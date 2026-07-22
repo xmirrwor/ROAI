@@ -1,0 +1,1410 @@
+# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Copyright (c) 2021 ETH Zurich, Nikita Rudin
+
+import os
+import pickle
+
+import numpy as np
+import torch
+from isaacgym import gymtorch
+from isaacgym.torch_utils import (
+    euler_from_quat,
+    quat_from_euler_xyz,
+    quat_rotate_inverse,
+    torch_rand_float,
+    torch_wrap_to_pi_minuspi,
+)
+from legged_panguin.envs import LeggedRobot
+
+
+class MiniDuck(LeggedRobot):
+    def _init_buffers(self):
+        super()._init_buffers()
+        self.base_command_ranges = {
+            name: list(values) for name, values in self.command_ranges.items()
+        }
+        init_quat = self.base_init_state[3:7].unsqueeze(0)
+        self.target_projected_gravity = quat_rotate_inverse(init_quat, self.gravity_vec[:1])
+        self.commanded_actions = torch.zeros_like(self.actions)
+        self.commanded_action_history_1 = torch.zeros_like(self.actions)
+        self.commanded_action_history_2 = torch.zeros_like(self.actions)
+        _, _, yaw = euler_from_quat(self.base_quat)
+        self.command_heading = yaw.clone()
+        self.command_start_xy = self.root_states[:, :2].clone()
+
+        max_action_delay = self.cfg.domain_rand.max_action_delay
+        self.action_delay_buffer = torch.zeros(
+            max_action_delay + 1,
+            self.num_envs,
+            self.num_actions,
+            device=self.device,
+        )
+        self.action_delay_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+
+        max_imu_delay = self.cfg.domain_rand.max_imu_delay
+        self.imu_history = torch.zeros(
+            max_imu_delay + 1,
+            self.num_envs,
+            9,
+            device=self.device,
+        )
+        self.imu_delay_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.gyro_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self.gravity_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self.accel_bias = torch.zeros(self.num_envs, 3, device=self.device)
+
+        self.motor_strengths = torch.ones(
+            self.num_envs, self.num_actions, device=self.device
+        )
+        self.kp_factors = torch.ones_like(self.motor_strengths)
+        self.kd_factors = torch.ones_like(self.motor_strengths)
+        self.joint_target_offsets = torch.zeros_like(self.motor_strengths)
+        self.encoder_offsets = torch.zeros_like(self.motor_strengths)
+        self.max_motor_velocities = torch.full_like(
+            self.motor_strengths, self.cfg.domain_rand.nominal_motor_velocity
+        )
+        self.previous_motor_targets = self.default_dof_pos.repeat(self.num_envs, 1)
+
+        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(
+            self.num_envs, self.num_bodies, 13
+        )
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        self._load_teacher_reference()
+        self.gait_phase_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.gait_contacts = torch.zeros(
+            self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device
+        )
+        self.gait_last_contacts = torch.zeros_like(self.gait_contacts)
+        self.gait_first_contacts = torch.zeros_like(self.gait_contacts, dtype=torch.float)
+        self.gait_contact_switch = torch.zeros(self.num_envs, device=self.device)
+        self.current_teacher_reference = torch.zeros(
+            self.num_envs, 60, device=self.device
+        )
+        self.home_feet_z = torch.mean(
+            self.rigid_body_state[:, self.feet_indices, 2], dim=0
+        )
+        self._update_command_range_schedule()
+        self._randomize_dynamic_properties(
+            torch.arange(self.num_envs, device=self.device)
+        )
+
+    def _load_teacher_reference(self):
+        path = getattr(self.cfg.rewards, "teacher_reference_path", "")
+        self.use_teacher_reference = bool(path) and os.path.exists(path)
+        self.teacher_reference_period_steps = 1
+        self.teacher_reference_commands = torch.zeros(1, 3, device=self.device)
+        self.teacher_reference_samples = torch.zeros(1, 1, 60, device=self.device)
+        self.teacher_command_scale = torch.ones(3, device=self.device)
+        self.teacher_home_target = self.default_dof_pos.clone()
+
+        if not self.use_teacher_reference:
+            if path:
+                print(f"MiniDuck teacher reference not found: {path}")
+            return
+
+        with open(path, "rb") as file:
+            data = pickle.load(file)
+
+        commands = []
+        samples = []
+        home_index = 0
+        sorted_items = sorted(
+            data.items(),
+            key=lambda item: tuple(float(value) for value in item[0].split("_")),
+        )
+        for index, (name, entry) in enumerate(sorted_items):
+            command = [float(value) for value in name.split("_")]
+            if command == [0.0, 0.0, 0.0]:
+                home_index = index
+            coefficients = np.asarray(
+                [entry["coefficients"][f"dim_{dim}"] for dim in range(60)],
+                dtype=np.float32,
+            )
+            period_steps = int(entry["nb_steps_in_period"])
+            phase_samples = []
+            flipped = coefficients[:, ::-1]
+            for phase_step in range(period_steps):
+                t = np.clip(phase_step / period_steps, 0.0, 1.0)
+                phase_samples.append(
+                    [np.polyval(poly_coeffs, t) for poly_coeffs in flipped]
+                )
+            commands.append(command)
+            samples.append(phase_samples)
+
+        self.teacher_reference_period_steps = len(samples[0])
+        self.teacher_reference_commands = torch.tensor(
+            commands, dtype=torch.float32, device=self.device
+        )
+        self.teacher_reference_samples = torch.tensor(
+            samples, dtype=torch.float32, device=self.device
+        )
+        self.teacher_command_scale = torch.tensor(
+            self.cfg.rewards.teacher_command_scale,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.teacher_home_target = self.teacher_reference_samples[
+            home_index, 0, 50:60
+        ].clone()
+        print(
+            "MiniDuck loaded BEST_WALK teacher reference: "
+            f"{len(commands)} commands, {self.teacher_reference_period_steps} phases"
+        )
+
+    def _sample_teacher_reference(self):
+        if not self.use_teacher_reference:
+            return self.current_teacher_reference.zero_()
+
+        normalized_error = (
+            self.commands[:, None, :3] - self.teacher_reference_commands[None, :, :]
+        ) / self.teacher_command_scale
+        reference_ids = torch.argmin(
+            torch.sum(torch.square(normalized_error), dim=-1), dim=1
+        )
+        phase_ids = self.gait_phase_steps % self.teacher_reference_period_steps
+        self.current_teacher_reference = self.teacher_reference_samples[
+            reference_ids, phase_ids
+        ]
+        return self.current_teacher_reference
+
+    def _gait_phase_observation(self):
+        phase = (
+            self.gait_phase_steps.float()
+            / max(self.teacher_reference_period_steps, 1)
+            * (2.0 * np.pi)
+        )
+        return torch.stack((torch.cos(phase), torch.sin(phase)), dim=-1)
+
+    def _current_foot_contacts(self):
+        return self.contact_forces[:, self.feet_indices, 2] > 1.0
+
+    def _update_gait_reference_state(self):
+        self.gait_phase_steps = (
+            self.gait_phase_steps + 1
+        ) % self.teacher_reference_period_steps
+        contacts = self._current_foot_contacts()
+        self.gait_contacts = contacts
+        previous = self.gait_last_contacts
+        self.gait_first_contacts = ((~previous) & contacts).float()
+        self.gait_contact_switch = torch.clamp(
+            torch.sum(torch.abs(contacts.float() - previous.float()), dim=1),
+            max=1.0,
+        )
+        self.gait_last_contacts = contacts
+        self._sample_teacher_reference()
+
+    def step(self, actions):
+        clip_actions = self.cfg.normalization.clip_actions
+        raw_actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        self.commanded_action_history_2[:] = self.commanded_action_history_1
+        self.commanded_action_history_1[:] = self.commanded_actions
+        self.commanded_actions[:] = raw_actions
+
+        self.action_delay_buffer = torch.roll(
+            self.action_delay_buffer, shifts=1, dims=0
+        )
+        self.action_delay_buffer[0] = raw_actions
+        delay_strength = self._domain_rand_strength()
+        active_max_delay = int(
+            round(self.cfg.domain_rand.max_action_delay * delay_strength)
+        )
+        if active_max_delay > 0:
+            self.action_delay_steps = torch.randint(
+                0,
+                active_max_delay + 1,
+                (self.num_envs,),
+                device=self.device,
+            )
+        else:
+            self.action_delay_steps.zero_()
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        delayed_actions = self.action_delay_buffer[
+            self.action_delay_steps, env_ids
+        ]
+        return super().step(delayed_actions)
+
+    def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
+        if len(env_ids) == 0 or not hasattr(self, "commanded_actions"):
+            return
+        self._update_command_range_schedule()
+        self.extras["episode"]["max_command_x"] = float(self.command_ranges["lin_vel_x"][1])
+        self.extras["episode"]["max_command_y"] = float(self.command_ranges["lin_vel_y"][1])
+        self.extras["episode"]["max_command_yaw"] = float(self.command_ranges["ang_vel_yaw"][1])
+        self.extras["episode"]["push_max_vel_xy"] = float(self._current_push_max_vel())
+
+        self.commanded_actions[env_ids] = 0.0
+        self.commanded_action_history_1[env_ids] = 0.0
+        self.commanded_action_history_2[env_ids] = 0.0
+        self.actions[env_ids] = 0.0
+        self.action_delay_buffer[:, env_ids] = 0.0
+        self.previous_motor_targets[env_ids] = self.default_dof_pos
+        self.gait_phase_steps[env_ids] = 0
+        self.gait_contacts[env_ids] = False
+        self.gait_last_contacts[env_ids] = False
+        self.gait_first_contacts[env_ids] = 0.0
+        self.gait_contact_switch[env_ids] = 0.0
+        self.current_teacher_reference[env_ids] = 0.0
+        self._randomize_dynamic_properties(env_ids)
+
+        self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
+        self.base_lin_vel[env_ids] = quat_rotate_inverse(
+            self.base_quat[env_ids], self.root_states[env_ids, 7:10]
+        )
+        self.base_ang_vel[env_ids] = quat_rotate_inverse(
+            self.base_quat[env_ids], self.root_states[env_ids, 10:13]
+        )
+        self.projected_gravity[env_ids] = quat_rotate_inverse(
+            self.base_quat[env_ids], self.gravity_vec[env_ids]
+        )
+        _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+        self.command_heading[env_ids] = yaw
+        self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+        self.last_root_vel[env_ids] = self.root_states[env_ids, 7:13]
+        initial_imu = torch.cat(
+            (
+                self.base_ang_vel[env_ids],
+                self.projected_gravity[env_ids],
+                -self.projected_gravity[env_ids] * 9.81,
+            ),
+            dim=-1,
+        )
+        self.imu_history[:, env_ids] = initial_imu.unsqueeze(0)
+
+    def _domain_rand_strength(self):
+        warmup = self.cfg.domain_rand.curriculum_warmup_steps
+        ramp = max(self.cfg.domain_rand.curriculum_ramp_steps, 1)
+        return min(max((self.common_step_counter - warmup) / ramp, 0.0), 1.0)
+
+    def _scaled_uniform(self, low, high, shape, strength):
+        low = 1.0 + (low - 1.0) * strength
+        high = 1.0 + (high - 1.0) * strength
+        return torch_rand_float(low, high, shape, device=self.device)
+
+    def _randomize_dynamic_properties(self, env_ids):
+        if len(env_ids) == 0:
+            return
+        strength = self._domain_rand_strength()
+        count = len(env_ids)
+        cfg = self.cfg.domain_rand
+
+        self.motor_strengths[env_ids] = self._scaled_uniform(
+            *cfg.motor_strength_range,
+            (count, self.num_actions),
+            strength,
+        )
+        self.kp_factors[env_ids] = self._scaled_uniform(
+            *cfg.kp_factor_range,
+            (count, self.num_actions),
+            strength,
+        )
+        self.kd_factors[env_ids] = self._scaled_uniform(
+            *cfg.kd_factor_range,
+            (count, self.num_actions),
+            strength,
+        )
+        motor_velocity_low = (
+            cfg.nominal_motor_velocity
+            + (cfg.motor_velocity_range[0] - cfg.nominal_motor_velocity) * strength
+        )
+        motor_velocity_high = (
+            cfg.nominal_motor_velocity
+            + (cfg.motor_velocity_range[1] - cfg.nominal_motor_velocity) * strength
+        )
+        self.max_motor_velocities[env_ids] = torch_rand_float(
+            motor_velocity_low,
+            motor_velocity_high,
+            (count, self.num_actions),
+            device=self.device,
+        )
+
+        target_offset = cfg.joint_target_offset * strength
+        encoder_offset = cfg.encoder_offset * strength
+        self.joint_target_offsets[env_ids] = torch_rand_float(
+            -target_offset,
+            target_offset,
+            (count, self.num_actions),
+            device=self.device,
+        )
+        self.encoder_offsets[env_ids] = torch_rand_float(
+            -encoder_offset,
+            encoder_offset,
+            (count, self.num_actions),
+            device=self.device,
+        )
+
+        gyro_bias = cfg.gyro_bias * strength
+        gravity_bias = cfg.gravity_bias * strength
+        accel_bias = cfg.accel_bias * strength
+        self.gyro_bias[env_ids] = torch_rand_float(
+            -gyro_bias, gyro_bias, (count, 3), device=self.device
+        )
+        self.gravity_bias[env_ids] = torch_rand_float(
+            -gravity_bias, gravity_bias, (count, 3), device=self.device
+        )
+        self.accel_bias[env_ids] = torch_rand_float(
+            -accel_bias, accel_bias, (count, 3), device=self.device
+        )
+
+        active_max_imu_delay = int(round(cfg.max_imu_delay * strength))
+        if active_max_imu_delay > 0:
+            self.imu_delay_steps[env_ids] = torch.randint(
+                0,
+                active_max_imu_delay + 1,
+                (count,),
+                device=self.device,
+            )
+        else:
+            self.imu_delay_steps[env_ids] = 0
+
+    def _process_dof_props(self, props, env_id):
+        props = props.copy()
+        cfg = self.cfg.domain_rand
+        if cfg.use_sts3215_xml_dof_defaults:
+            names = props.dtype.names
+            if "damping" in names:
+                props["damping"][:] = cfg.sts3215_dof_damping
+            if "friction" in names:
+                props["friction"][:] = cfg.sts3215_dof_friction
+            if "armature" in names:
+                props["armature"][:] = cfg.sts3215_dof_armature
+            if "effort" in names:
+                props["effort"][:] = cfg.sts3215_effort
+            if "velocity" in names:
+                props["velocity"][:] = cfg.sts3215_velocity
+
+        props = super()._process_dof_props(props, env_id)
+        if cfg.randomize_dof_properties:
+            props["friction"] *= np.random.uniform(*cfg.dof_friction_scale_range)
+            props["damping"] *= np.random.uniform(*cfg.dof_damping_scale_range)
+            props["armature"] *= np.random.uniform(*cfg.dof_armature_scale_range)
+        return props
+
+    def _process_rigid_body_props(self, props, env_id):
+        props = super()._process_rigid_body_props(props, env_id)
+        cfg = self.cfg.domain_rand
+        if not cfg.randomize_link_mass:
+            return props
+
+        for prop in props:
+            if prop.mass > 0.01:
+                prop.mass *= np.random.uniform(*cfg.link_mass_scale_range)
+
+        trunk_id = 1 if len(props) > 1 else 0
+        props[trunk_id].mass = max(
+            props[trunk_id].mass + np.random.uniform(*cfg.trunk_added_mass_range),
+            0.05,
+        )
+        com_range = cfg.trunk_com_range
+        props[trunk_id].com.x += np.random.uniform(-com_range[0], com_range[0])
+        props[trunk_id].com.y += np.random.uniform(-com_range[1], com_range[1])
+        props[trunk_id].com.z += np.random.uniform(-com_range[2], com_range[2])
+        return props
+
+    def _command_curriculum_stage(self):
+        cfg = self.cfg.commands
+        if self.common_step_counter < cfg.sagittal_phase_steps:
+            return "sagittal"
+        if self.common_step_counter < (
+            cfg.sagittal_phase_steps + cfg.lateral_phase_steps
+        ):
+            return "lateral"
+        if self.common_step_counter < (
+            cfg.sagittal_phase_steps
+            + cfg.lateral_phase_steps
+            + cfg.yaw_phase_steps
+        ):
+            return "yaw"
+        return "mixed"
+
+    @staticmethod
+    def _ramp_progress(step, start_step, ramp_steps):
+        return min(max((step - start_step) / max(ramp_steps, 1), 0.0), 1.0)
+
+    def _current_command_stage(self):
+        cfg = self.cfg.commands
+        if self.common_step_counter < cfg.advanced_curriculum_start_step:
+            return self._command_curriculum_stage()
+
+        relative_step = self.common_step_counter - cfg.advanced_curriculum_start_step
+        if relative_step < cfg.advanced_lateral_rehearsal_steps:
+            return "advanced_lateral_rehearsal"
+        if relative_step < (
+            cfg.advanced_lateral_rehearsal_steps
+            + cfg.advanced_yaw_rehearsal_steps
+        ):
+            return "advanced_yaw_rehearsal"
+        if relative_step < (
+            cfg.advanced_lateral_rehearsal_steps
+            + cfg.advanced_yaw_rehearsal_steps
+            + cfg.advanced_balanced_steps
+        ):
+            return "advanced_balanced"
+        return "advanced_final"
+
+    @staticmethod
+    def _interpolate_range(base_range, target_range, progress):
+        return [
+            base_range[0] + (target_range[0] - base_range[0]) * progress,
+            base_range[1] + (target_range[1] - base_range[1]) * progress,
+        ]
+
+    def _update_command_range_schedule(self):
+        cfg = self.cfg.commands
+        x_progress = self._ramp_progress(
+            self.common_step_counter,
+            cfg.advanced_curriculum_start_step,
+            cfg.advanced_x_ramp_steps,
+        )
+        self.command_ranges["lin_vel_x"] = self._interpolate_range(
+            self.base_command_ranges["lin_vel_x"],
+            cfg.ranges.advanced_lin_vel_x,
+            x_progress,
+        )
+
+        lateral_progress = self._ramp_progress(
+            self.common_step_counter,
+            cfg.advanced_curriculum_start_step,
+            cfg.advanced_lateral_ramp_steps,
+        )
+        self.command_ranges["lin_vel_y"] = self._interpolate_range(
+            self.base_command_ranges["lin_vel_y"],
+            cfg.ranges.advanced_lin_vel_y,
+            lateral_progress,
+        )
+
+        yaw_progress = self._ramp_progress(
+            self.common_step_counter,
+            cfg.advanced_curriculum_start_step + cfg.advanced_lateral_rehearsal_steps,
+            cfg.advanced_yaw_ramp_steps,
+        )
+        self.command_ranges["ang_vel_yaw"] = self._interpolate_range(
+            self.base_command_ranges["ang_vel_yaw"],
+            cfg.ranges.advanced_ang_vel_yaw,
+            yaw_progress,
+        )
+
+    def _current_min_abs(self, range_name):
+        cfg = self.cfg.commands
+        if self.common_step_counter < cfg.advanced_curriculum_start_step:
+            if range_name == "lin_vel_x":
+                return cfg.min_abs_x
+            if range_name == "lin_vel_y":
+                return cfg.min_abs_y
+            return cfg.min_abs_yaw
+
+        if range_name == "lin_vel_x":
+            progress = self._ramp_progress(
+                self.common_step_counter,
+                cfg.advanced_curriculum_start_step,
+                cfg.advanced_x_ramp_steps,
+            )
+            return cfg.min_abs_x + (cfg.advanced_min_abs_x - cfg.min_abs_x) * progress
+        if range_name == "lin_vel_y":
+            progress = self._ramp_progress(
+                self.common_step_counter,
+                cfg.advanced_curriculum_start_step,
+                cfg.advanced_lateral_ramp_steps,
+            )
+            return cfg.min_abs_y + (cfg.advanced_min_abs_y - cfg.min_abs_y) * progress
+
+        progress = self._ramp_progress(
+            self.common_step_counter,
+            cfg.advanced_curriculum_start_step + cfg.advanced_lateral_rehearsal_steps,
+            cfg.advanced_yaw_ramp_steps,
+        )
+        return cfg.min_abs_yaw + (cfg.advanced_min_abs_yaw - cfg.min_abs_yaw) * progress
+
+    def _current_mode_probabilities(self, stage):
+        cfg = self.cfg.commands
+        if stage == "advanced_lateral_rehearsal":
+            return (
+                cfg.advanced_lateral_zero_prob,
+                cfg.advanced_lateral_sagittal_prob,
+                cfg.advanced_lateral_lateral_prob,
+                cfg.advanced_lateral_yaw_prob,
+            )
+        if stage == "advanced_yaw_rehearsal":
+            return (
+                cfg.advanced_yaw_zero_prob,
+                cfg.advanced_yaw_sagittal_prob,
+                cfg.advanced_yaw_lateral_prob,
+                cfg.advanced_yaw_yaw_prob,
+            )
+        if stage == "advanced_balanced":
+            return (
+                cfg.advanced_balanced_zero_prob,
+                cfg.advanced_balanced_sagittal_prob,
+                cfg.advanced_balanced_lateral_prob,
+                cfg.advanced_balanced_yaw_prob,
+            )
+        if stage == "advanced_final":
+            return (
+                cfg.advanced_final_zero_prob,
+                cfg.advanced_final_sagittal_prob,
+                cfg.advanced_final_lateral_prob,
+                cfg.advanced_final_yaw_prob,
+            )
+        return (
+            cfg.zero_prob,
+            cfg.sagittal_prob,
+            cfg.lateral_prob,
+            cfg.yaw_prob,
+        )
+
+    def _current_push_max_vel(self):
+        cfg = self.cfg.domain_rand
+        if not cfg.curriculum_push_robots:
+            return cfg.max_push_vel_xy if cfg.push_robots else 0.0
+        progress = self._ramp_progress(
+            self.common_step_counter,
+            cfg.advanced_push_start_steps,
+            cfg.advanced_push_ramp_steps,
+        )
+        return cfg.advanced_max_push_vel_xy * progress
+
+    def _resample_commands(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        self._update_command_range_schedule()
+        self.commands[env_ids, :3] = 0.0
+        _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+        self.command_heading[env_ids] = yaw
+        self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+        stage = self._current_command_stage()
+        zero_prob = self.cfg.commands.stage_zero_prob
+
+        if stage == "sagittal":
+            active_mask = torch.rand(len(env_ids), device=self.device) >= zero_prob
+            if torch.any(active_mask):
+                sagittal_ids = env_ids[active_mask]
+                self._sample_sagittal_command(sagittal_ids, allow_turn=False)
+            return
+
+        if stage == "lateral":
+            active_mask = torch.rand(len(env_ids), device=self.device) >= zero_prob
+            if torch.any(active_mask):
+                lateral_ids = env_ids[active_mask]
+                self.commands[lateral_ids, 1] = self._sample_axis_command(
+                    "lin_vel_y", self._current_min_abs("lin_vel_y"), len(lateral_ids)
+                )
+            return
+
+        if stage == "yaw":
+            active_mask = torch.rand(len(env_ids), device=self.device) >= zero_prob
+            if torch.any(active_mask):
+                turn_ids = env_ids[active_mask]
+                self.commands[turn_ids, 2] = self._sample_axis_command(
+                    "ang_vel_yaw", self._current_min_abs("ang_vel_yaw"), len(turn_ids)
+                )
+            return
+
+        zero_prob, sagittal_prob, lateral_prob, yaw_prob = (
+            self._current_mode_probabilities(stage)
+        )
+        total_prob = zero_prob + sagittal_prob + lateral_prob + yaw_prob
+        zero_cut = zero_prob / total_prob
+        sagittal_cut = (zero_prob + sagittal_prob) / total_prob
+        lateral_cut = (zero_prob + sagittal_prob + lateral_prob) / total_prob
+
+        mode_draw = torch.rand(len(env_ids), device=self.device)
+        sagittal_mask = (mode_draw >= zero_cut) & (mode_draw < sagittal_cut)
+        lateral_mask = (mode_draw >= sagittal_cut) & (mode_draw < lateral_cut)
+        turn_mask = mode_draw >= lateral_cut
+
+        if torch.any(sagittal_mask):
+            sagittal_ids = env_ids[sagittal_mask]
+            self._sample_sagittal_command(
+                sagittal_ids,
+                allow_turn=stage.startswith("advanced"),
+            )
+
+        if torch.any(lateral_mask):
+            lateral_ids = env_ids[lateral_mask]
+            self.commands[lateral_ids, 1] = self._sample_axis_command(
+                "lin_vel_y", self._current_min_abs("lin_vel_y"), len(lateral_ids)
+            )
+
+        if torch.any(turn_mask):
+            turn_ids = env_ids[turn_mask]
+            self.commands[turn_ids, 2] = self._sample_axis_command(
+                "ang_vel_yaw", self._current_min_abs("ang_vel_yaw"), len(turn_ids)
+            )
+
+    def _sample_sagittal_command(self, env_ids, allow_turn):
+        count = len(env_ids)
+        self.commands[env_ids, 0] = self._sample_axis_command(
+            "lin_vel_x", self._current_min_abs("lin_vel_x"), count
+        )
+        if not allow_turn:
+            return
+        turn_prob = (
+            self.cfg.commands.advanced_sagittal_turn_prob
+            if self.common_step_counter >= self.cfg.commands.advanced_curriculum_start_step
+            else self.cfg.commands.sagittal_turn_prob
+        )
+        turn_mask = torch.rand(count, device=self.device) < turn_prob
+        if torch.any(turn_mask):
+            turn_ids = env_ids[turn_mask]
+            self.commands[turn_ids, 2] = self._sample_axis_command(
+                "ang_vel_yaw",
+                self._current_min_abs("ang_vel_yaw"),
+                len(turn_ids),
+                self.cfg.commands.sagittal_turn_yaw_scale,
+            )
+
+    def _sample_axis_command(self, range_name, min_abs, count, max_abs_scale=1.0):
+        command_min, command_max = self.command_ranges[range_name]
+        signs = torch.ones(count, device=self.device)
+        signs[:count // 2] = -1.0
+        signs = signs[torch.randperm(count, device=self.device)]
+        values = torch.zeros(count, device=self.device)
+
+        positive_mask = signs > 0.0
+        if torch.any(positive_mask):
+            positive_max = max(command_max * max_abs_scale, min_abs)
+            values[positive_mask] = torch_rand_float(
+                min_abs,
+                positive_max,
+                (int(torch.sum(positive_mask).item()), 1),
+                device=self.device,
+            ).squeeze(1)
+
+        negative_mask = ~positive_mask
+        if torch.any(negative_mask):
+            negative_max = max(abs(command_min) * max_abs_scale, min_abs)
+            values[negative_mask] = -torch_rand_float(
+                min_abs,
+                negative_max,
+                (int(torch.sum(negative_mask).item()), 1),
+                device=self.device,
+            ).squeeze(1)
+
+        return torch.clip(values, command_min, command_max)
+
+    def _reset_dofs(self, env_ids):
+        scale_min, scale_max = self.cfg.init_state.reset_joint_scale_range
+        self.dof_pos[env_ids] = self.default_dof_pos * torch_rand_float(
+            scale_min, scale_max, (len(env_ids), self.num_dof), device=self.device
+        )
+        if self.cfg.init_state.reset_joint_offset > 0.0:
+            self.dof_pos[env_ids] += torch_rand_float(
+                -self.cfg.init_state.reset_joint_offset,
+                self.cfg.init_state.reset_joint_offset,
+                (len(env_ids), self.num_dof),
+                device=self.device,
+            )
+        self.dof_vel[env_ids] = 0.0
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_dof_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.dof_state),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
+    def _reset_root_states(self, env_ids):
+        self.root_states[env_ids] = self.base_init_state
+        self.root_states[env_ids, :3] += self.env_origins[env_ids]
+        xy_range = self.cfg.init_state.reset_xy_range
+        if xy_range > 0.0:
+            self.root_states[env_ids, :2] += torch_rand_float(
+                -xy_range, xy_range, (len(env_ids), 2), device=self.device
+            )
+
+        roll = torch_rand_float(
+            -self.cfg.init_state.reset_roll_range,
+            self.cfg.init_state.reset_roll_range,
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+        pitch = torch_rand_float(
+            self.cfg.init_state.base_pitch - self.cfg.init_state.reset_pitch_range,
+            self.cfg.init_state.base_pitch + self.cfg.init_state.reset_pitch_range,
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+        yaw = torch_rand_float(
+            -self.cfg.init_state.reset_yaw_range,
+            self.cfg.init_state.reset_yaw_range,
+            (len(env_ids), 1),
+            device=self.device,
+        ).squeeze(1)
+        self.root_states[env_ids, 3:7] = quat_from_euler_xyz(roll, pitch, yaw)
+
+        lin_vel_range = self.cfg.init_state.reset_lin_vel_range
+        ang_vel_range = self.cfg.init_state.reset_ang_vel_range
+        self.root_states[env_ids, 7:10] = torch_rand_float(
+            -lin_vel_range, lin_vel_range, (len(env_ids), 3), device=self.device
+        )
+        self.root_states[env_ids, 10:13] = torch_rand_float(
+            -ang_vel_range, ang_vel_range, (len(env_ids), 3), device=self.device
+        )
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
+    def _compute_torques(self, actions):
+        if not self.cfg.control.use_action_scale_curriculum:
+            targets = (
+                actions * self.cfg.control.action_scale
+                + self.default_dof_pos
+                + self.joint_target_offsets
+            )
+            max_target_delta = self.max_motor_velocities * self.sim_params.dt
+            targets = torch.clip(
+                targets,
+                self.previous_motor_targets - max_target_delta,
+                self.previous_motor_targets + max_target_delta,
+            )
+            self.previous_motor_targets[:] = targets
+            torques = (
+                self.p_gains * self.kp_factors * (targets - self.dof_pos)
+                - self.d_gains * self.kd_factors * self.dof_vel
+            )
+            torques *= self.motor_strengths
+            return torch.clip(torques, -self.torque_limits, self.torque_limits)
+
+        warmup_steps = self.cfg.control.action_scale_warmup_steps
+        ramp_steps = max(self.cfg.control.action_scale_ramp_steps, 1)
+        progress = min(
+            max((self.common_step_counter - warmup_steps) / ramp_steps, 0.0),
+            1.0,
+        )
+        action_scale = (
+            self.cfg.control.warmup_action_scale * (1.0 - progress)
+            + self.cfg.control.action_scale * progress
+        )
+        targets = (
+            actions * action_scale
+            + self.default_dof_pos
+            + self.joint_target_offsets
+        )
+        max_target_delta = self.max_motor_velocities * self.sim_params.dt
+        targets = torch.clip(
+            targets,
+            self.previous_motor_targets - max_target_delta,
+            self.previous_motor_targets + max_target_delta,
+        )
+        self.previous_motor_targets[:] = targets
+        torques = (
+            self.p_gains * self.kp_factors * (targets - self.dof_pos)
+            - self.d_gains * self.kd_factors * self.dof_vel
+        )
+        torques *= self.motor_strengths
+        return torch.clip(torques, -self.torque_limits, self.torque_limits)
+
+    def compute_observations(self):
+        world_accel = (
+            self.root_states[:, 7:10] - self.last_root_vel[:, :3]
+        ) / self.dt
+        specific_force = quat_rotate_inverse(
+            self.base_quat,
+            world_accel - self.gravity_vec * 9.81,
+        )
+        specific_force = torch.clip(specific_force, -30.0, 30.0)
+        current_imu = torch.cat(
+            (self.base_ang_vel, self.projected_gravity, specific_force), dim=-1
+        )
+        self.imu_history = torch.roll(self.imu_history, shifts=1, dims=0)
+        self.imu_history[0] = current_imu
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        delayed_imu = self.imu_history[self.imu_delay_steps, env_ids]
+        gyro = delayed_imu[:, :3] + self.gyro_bias
+        gravity = delayed_imu[:, 3:6] + self.gravity_bias
+        accelerometer = delayed_imu[:, 6:9] + self.accel_bias
+        measured_dof_pos = self.dof_pos + self.encoder_offsets
+
+        self.obs_buf = torch.cat(
+            (
+                gyro * self.obs_scales.ang_vel,
+                gravity,
+                accelerometer * self.obs_scales.accel,
+                self.commands[:, :3] * self.commands_scale,
+                (measured_dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
+                self.dof_vel * self.obs_scales.dof_vel,
+                self.commanded_actions,
+                self.commanded_action_history_1,
+                self.commanded_action_history_2,
+                self._gait_phase_observation(),
+            ),
+            dim=-1,
+        )
+        if self.cfg.terrain.measure_heights:
+            heights = (
+                torch.clip(self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights, -1, 1.0)
+                * self.obs_scales.height_measurements
+            )
+            self.obs_buf = torch.cat((self.obs_buf, heights), dim=-1)
+        if self.add_noise:
+            self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
+
+    def check_termination(self):
+        target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
+        gravity_alignment = torch.sum(
+            self.projected_gravity * target_gravity,
+            dim=1,
+        )
+        fallen = gravity_alignment < torch.cos(
+            torch.tensor(
+                self.cfg.rewards.termination_body_angle,
+                device=self.device,
+            )
+        )
+        too_low = self.root_states[:, 2] < self.cfg.rewards.termination_height
+        self.reset_buf = fallen | too_low
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf |= self.time_out_buf
+
+    def _get_noise_scale_vec(self, cfg):
+        noise_vec = torch.zeros_like(self.obs_buf[0])
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+
+        idx = 0
+        noise_vec[idx:idx + 3] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        idx += 3
+        noise_vec[idx:idx + 3] = noise_scales.gravity * noise_level
+        idx += 3
+        noise_vec[idx:idx + 3] = noise_scales.accel * noise_level * self.obs_scales.accel
+        idx += 3
+        noise_vec[idx:idx + 3] = 0.0
+        idx += 3
+        noise_vec[idx:idx + self.num_dof] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        idx += self.num_dof
+        noise_vec[idx:idx + self.num_dof] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        idx += self.num_dof
+        for _ in range(3):
+            noise_vec[idx:idx + self.num_actions] = 0.0
+            idx += self.num_actions
+
+        if self.cfg.terrain.measure_heights:
+            noise_vec[idx:] = (
+                noise_scales.height_measurements
+                * noise_level
+                * self.obs_scales.height_measurements
+            )
+        return noise_vec
+
+    def _reward_support_contact(self):
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        return torch.any(contacts, dim=1).float()
+
+    def _moving_command_mask(self):
+        x_active = torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x")
+        y_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
+        yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
+        return (x_active | y_active | yaw_active).float()
+
+    def _pure_yaw_command_mask(self):
+        yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
+        low_translation = torch.norm(self.commands[:, :2], dim=1) < 0.05
+        return (yaw_active & low_translation).float()
+
+    def _pure_lateral_command_mask(self):
+        lateral_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
+        low_sagittal = torch.abs(self.commands[:, 0]) < 0.04
+        low_yaw = torch.abs(self.commands[:, 2]) < 0.08
+        return (lateral_active & low_sagittal & low_yaw).float()
+
+    def _reference_contacts(self):
+        return torch.clip(self.current_teacher_reference[:, 32:34], 0.0, 1.0)
+
+    def _reference_leg_pos(self):
+        return torch.cat(
+            (
+                self.current_teacher_reference[:, :5],
+                self.current_teacher_reference[:, 11:16],
+            ),
+            dim=1,
+        )
+
+    def _foot_clearance(self):
+        foot_z = self.rigid_body_state[:, self.feet_indices, 2]
+        return torch.clamp(foot_z - self.home_feet_z.unsqueeze(0), min=0.0, max=0.05)
+
+    def _normalized_foot_lift(self):
+        clearance = self._foot_clearance()
+        return torch.clamp(
+            (clearance - self.cfg.rewards.foot_lift_deadband)
+            / self.cfg.rewards.foot_lift_target,
+            min=0.0,
+            max=1.0,
+        )
+
+    def _single_support(self):
+        contacts = self.gait_contacts.float()
+        return (torch.sum(contacts, dim=1) == 1).float()
+
+    def _stepping_signal(self):
+        return torch.clamp(
+            self._single_support()
+            + torch.sum(self.gait_first_contacts, dim=1)
+            + 0.5 * self.gait_contact_switch,
+            min=0.0,
+            max=1.0,
+        )
+
+    def _clock_swing_gates(self):
+        phase = (
+            self.gait_phase_steps.float()
+            / max(self.teacher_reference_period_steps, 1)
+            * (2.0 * np.pi)
+        )
+        phase_sin = torch.sin(phase)
+        gate = self.cfg.rewards.clock_phase_gate
+        left_swing_gate = (phase_sin > gate).float()
+        right_swing_gate = (phase_sin < -gate).float()
+        gate_sum = torch.clamp(left_swing_gate + right_swing_gate, min=1.0)
+        return left_swing_gate, right_swing_gate, gate_sum
+
+    def _reward_teacher_action(self):
+        if not self.use_teacher_reference:
+            return torch.zeros(self.num_envs, device=self.device)
+        reference_action = self.current_teacher_reference[:, 40:50]
+        action_error = torch.mean(
+            torch.square(self.commanded_actions - reference_action), dim=1
+        )
+        return torch.exp(-3.0 * action_error) * self._moving_command_mask()
+
+    def _reward_teacher_action_error(self):
+        if not self.use_teacher_reference:
+            return torch.zeros(self.num_envs, device=self.device)
+        reference_action = self.current_teacher_reference[:, 40:50]
+        action_error = torch.mean(
+            torch.square(self.commanded_actions - reference_action), dim=1
+        )
+        return torch.clamp(action_error, max=4.0) * self._moving_command_mask()
+
+    def _reward_teacher_target(self):
+        if not self.use_teacher_reference:
+            return torch.zeros(self.num_envs, device=self.device)
+        reference_target = self.current_teacher_reference[:, 50:60]
+        target_error = torch.mean(
+            torch.square(self.previous_motor_targets - reference_target), dim=1
+        )
+        return torch.exp(-8.0 * target_error) * self._moving_command_mask()
+
+    def _reward_teacher_target_delta_error(self):
+        if not self.use_teacher_reference:
+            return torch.zeros(self.num_envs, device=self.device)
+        reference_delta = self.current_teacher_reference[:, 50:60] - self.teacher_home_target
+        target_delta = self.previous_motor_targets - self.default_dof_pos
+        delta_error = torch.mean(torch.square(target_delta - reference_delta), dim=1)
+        return torch.clamp(delta_error, max=1.0) * self._moving_command_mask()
+
+    def _reward_reference_gait_delta(self):
+        if not self.use_teacher_reference:
+            return torch.zeros(self.num_envs, device=self.device)
+        reference_delta = self.current_teacher_reference[:, 50:60] - self.teacher_home_target
+        target_delta = self.previous_motor_targets - self.default_dof_pos
+        delta_error = torch.mean(torch.square(target_delta - reference_delta), dim=1)
+        return torch.exp(-4.0 * delta_error) * self._moving_command_mask()
+
+    def _reward_phase_support_match(self):
+        reference_contact = self._reference_contacts()
+        contact = self.gait_contacts.float()
+        match = 1.0 - torch.mean(torch.abs(contact - reference_contact), dim=1)
+        return match * self._moving_command_mask()
+
+    def _reward_phase_swing_lift(self):
+        reference_swing = 1.0 - self._reference_contacts()
+        lift = self._normalized_foot_lift()
+        swing_count = torch.clamp(torch.sum(reference_swing, dim=1), min=1.0)
+        return (
+            torch.sum(lift * reference_swing, dim=1)
+            / swing_count
+            * self._moving_command_mask()
+        )
+
+    def _reward_swing_contact(self):
+        reference_swing = 1.0 - self._reference_contacts()
+        contact = self.gait_contacts.float()
+        swing_count = torch.clamp(torch.sum(reference_swing, dim=1), min=1.0)
+        return (
+            torch.sum(contact * reference_swing, dim=1)
+            / swing_count
+            * self._moving_command_mask()
+        )
+
+    def _reward_foot_lift(self):
+        lift = self._normalized_foot_lift()
+        return torch.max(lift, dim=1).values * self._moving_command_mask()
+
+    def _reward_swing_clearance(self):
+        clearance = self._foot_clearance()
+        contact = self.gait_contacts.float()
+        return torch.sum(clearance * (1.0 - contact), dim=1) * self._moving_command_mask()
+
+    def _reward_clocked_single_support(self):
+        contacts = self.gait_contacts.float()
+        left_gate, right_gate, gate_sum = self._clock_swing_gates()
+        left_support_ok = (1.0 - contacts[:, 0]) * contacts[:, 1]
+        right_support_ok = (1.0 - contacts[:, 1]) * contacts[:, 0]
+        return (
+            (left_gate * left_support_ok + right_gate * right_support_ok)
+            / gate_sum
+            * self._moving_command_mask()
+        )
+
+    def _reward_clocked_swing_lift(self):
+        contacts = self.gait_contacts.float()
+        lift = self._normalized_foot_lift()
+        left_gate, right_gate, gate_sum = self._clock_swing_gates()
+        return (
+            (
+                left_gate * lift[:, 0] * contacts[:, 1]
+                + right_gate * lift[:, 1] * contacts[:, 0]
+            )
+            / gate_sum
+            * self._moving_command_mask()
+        )
+
+    def _reward_clocked_swing_contact(self):
+        contacts = self.gait_contacts.float()
+        left_gate, right_gate, gate_sum = self._clock_swing_gates()
+        return (
+            (left_gate * contacts[:, 0] + right_gate * contacts[:, 1])
+            / gate_sum
+            * self._moving_command_mask()
+        )
+
+    def _reward_moving_contact_switch(self):
+        return self.gait_contact_switch * self._moving_command_mask()
+
+    def _reward_moving_without_step(self):
+        x_progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        y_progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 1],
+            self.base_lin_vel[:, 1],
+            self._current_min_abs("lin_vel_y"),
+        )
+        yaw_progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 2],
+            self.base_ang_vel[:, 2],
+            self._current_min_abs("ang_vel_yaw"),
+        )
+        progress = torch.max(torch.stack((x_progress, y_progress, yaw_progress), dim=1), dim=1).values
+        progress_without_step = torch.square(
+            torch.clamp(
+                progress - self.cfg.rewards.moving_without_step_progress,
+                min=0.0,
+            )
+        )
+        return (
+            progress_without_step
+            * (1.0 - self._stepping_signal())
+            * self._moving_command_mask()
+        )
+
+    def _reward_single_support(self):
+        return self._single_support() * self._moving_command_mask()
+
+    def _reward_double_support(self):
+        contacts = self.gait_contacts.float()
+        return (torch.sum(contacts, dim=1) == 2).float() * self._moving_command_mask()
+
+    def _reward_no_contact(self):
+        contacts = self.gait_contacts.float()
+        return (torch.sum(contacts, dim=1) == 0).float() * self._moving_command_mask()
+
+    def _reward_yaw_alternating_contact(self):
+        return self._single_support() * self._pure_yaw_command_mask()
+
+    def _reward_yaw_contact_switch(self):
+        return self.gait_contact_switch * self._pure_yaw_command_mask()
+
+    def _reward_yaw_twist_without_step(self):
+        yaw_speed = torch.sign(self.commands[:, 2]) * self.base_ang_vel[:, 2]
+        stepping_signal = torch.clamp(
+            self._single_support()
+            + torch.sum(self.gait_first_contacts, dim=1)
+            + 0.5 * self.gait_contact_switch,
+            min=0.0,
+            max=1.0,
+        )
+        twist = torch.square(torch.clamp(yaw_speed - 0.10, min=0.0))
+        return twist * (1.0 - stepping_signal) * self._pure_yaw_command_mask()
+
+    def _post_physics_step_callback(self):
+        super()._post_physics_step_callback()
+        self._update_command_range_schedule()
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+        self._update_gait_reference_state()
+        push_max_vel = self._current_push_max_vel()
+        if push_max_vel > 0.0 and self.common_step_counter % int(self.cfg.domain_rand.push_interval) == 0:
+            self._push_robots()
+
+    def _push_robots(self):
+        max_vel = self._current_push_max_vel()
+        if max_vel <= 0.0:
+            return
+        self.root_states[:, 7:9] = torch_rand_float(
+            -max_vel, max_vel, (self.num_envs, 2), device=self.device
+        )
+        self.gym.set_actor_root_state_tensor(
+            self.sim, gymtorch.unwrap_tensor(self.root_states)
+        )
+
+    def _reward_alive(self):
+        return torch.ones(self.num_envs, device=self.device)
+
+    def _reward_tracking_lin_vel(self):
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error / self.cfg.rewards.tracking_lin_sigma)
+
+    def _reward_tracking_lin_vel_x(self):
+        x_active = torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x")
+        x_error = torch.square(self.commands[:, 0] - self.base_lin_vel[:, 0])
+        return torch.exp(-x_error / self.cfg.rewards.tracking_lin_sigma) * x_active.float()
+
+    def _reward_tracking_lin_vel_y(self):
+        y_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
+        y_error = torch.square(self.commands[:, 1] - self.base_lin_vel[:, 1])
+        return torch.exp(-y_error / self.cfg.rewards.tracking_lin_sigma) * y_active.float()
+
+    def _reward_tracking_ang_vel(self):
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_ang_sigma)
+
+    def _reward_tracking_ang_vel_yaw(self):
+        yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / self.cfg.rewards.tracking_ang_sigma) * yaw_active.float()
+
+    def _axis_progress_and_lag(self, command, velocity, min_command):
+        active = torch.abs(command) >= min_command
+        signed_velocity = torch.sign(command) * velocity
+        normalized_velocity = signed_velocity / torch.clamp(
+            torch.abs(command),
+            min=min_command,
+        )
+        progress = torch.clamp(normalized_velocity, min=0.0, max=1.0)
+        lag = torch.square(torch.clamp(1.0 - normalized_velocity, min=0.0, max=2.0))
+        return progress * active.float(), lag * active.float()
+
+    def _reward_sagittal_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        return progress
+
+    def _reward_sagittal_step_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        return progress * self._stepping_signal()
+
+    def _reward_lateral_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 1],
+            self.base_lin_vel[:, 1],
+            self._current_min_abs("lin_vel_y"),
+        )
+        return progress
+
+    def _reward_lateral_step_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 1],
+            self.base_lin_vel[:, 1],
+            self._current_min_abs("lin_vel_y"),
+        )
+        return progress * self._stepping_signal()
+
+    def _reward_yaw_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 2],
+            self.base_ang_vel[:, 2],
+            self._current_min_abs("ang_vel_yaw"),
+        )
+        return progress
+
+    def _reward_yaw_step_progress(self):
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 2],
+            self.base_ang_vel[:, 2],
+            self._current_min_abs("ang_vel_yaw"),
+        )
+        return progress * self._stepping_signal()
+
+    def _reward_sagittal_lag(self):
+        _, lag = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        return lag
+
+    def _reward_lateral_lag(self):
+        _, lag = self._axis_progress_and_lag(
+            self.commands[:, 1],
+            self.base_lin_vel[:, 1],
+            self._current_min_abs("lin_vel_y"),
+        )
+        return lag
+
+    def _reward_yaw_lag(self):
+        _, lag = self._axis_progress_and_lag(
+            self.commands[:, 2],
+            self.base_ang_vel[:, 2],
+            self._current_min_abs("ang_vel_yaw"),
+        )
+        return lag
+
+    def _reward_command_stall(self):
+        x_cmd = self.commands[:, 0]
+        y_cmd = self.commands[:, 1]
+        yaw_cmd = self.commands[:, 2]
+        x_active = torch.abs(x_cmd) >= self._current_min_abs("lin_vel_x")
+        y_active = torch.abs(y_cmd) >= self._current_min_abs("lin_vel_y")
+        yaw_active = torch.abs(yaw_cmd) >= self._current_min_abs("ang_vel_yaw")
+
+        signed_speed = (
+            torch.sign(x_cmd) * self.base_lin_vel[:, 0] * x_active.float()
+            + torch.sign(y_cmd) * self.base_lin_vel[:, 1] * y_active.float()
+            + torch.sign(yaw_cmd) * self.base_ang_vel[:, 2] * yaw_active.float()
+        )
+        command_magnitude = (
+            torch.abs(x_cmd) * x_active.float()
+            + torch.abs(y_cmd) * y_active.float()
+            + torch.abs(yaw_cmd) * yaw_active.float()
+        )
+        normalized_speed = signed_speed / torch.clamp(command_magnitude, min=1.0e-4)
+        minimum_ratio = self.cfg.rewards.minimum_command_ratio
+        stall = torch.clamp(
+            (minimum_ratio - normalized_speed) / minimum_ratio,
+            min=0.0,
+            max=2.0,
+        )
+        return stall * (x_active | y_active | yaw_active).float()
+
+    def _reward_orientation(self):
+        return torch.sum(torch.square(self.projected_gravity - self.target_projected_gravity), dim=1)
+
+    def _reward_sagittal_axis_isolation(self):
+        sagittal_cmd = torch.abs(self.commands[:, 0]) > self._current_min_abs("lin_vel_x")
+        lateral_scale = max(abs(value) for value in self.command_ranges["lin_vel_y"])
+        yaw_scale = max(abs(value) for value in self.command_ranges["ang_vel_yaw"])
+        lateral_drift = torch.square(self.base_lin_vel[:, 1] / lateral_scale)
+        yaw_drift = torch.square(self.base_ang_vel[:, 2] / yaw_scale)
+        drift = torch.clamp(lateral_drift + yaw_drift, max=4.0)
+        return drift * sagittal_cmd.float()
+
+    def _pure_sagittal_command_mask(self):
+        """Select forward/backward commands without an intentional turn."""
+        return (
+            (torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x"))
+            & (torch.abs(self.commands[:, 1]) < self._current_min_abs("lin_vel_y"))
+            & (torch.abs(self.commands[:, 2]) < self._current_min_abs("ang_vel_yaw"))
+        ).float()
+
+    def _reward_sagittal_heading_error(self):
+        """Penalize accumulated yaw drift during a straight command segment."""
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        normalized = torch.square(heading_error / 0.20)
+        return torch.clamp(normalized, max=4.0) * self._pure_sagittal_command_mask()
+
+    def _reward_sagittal_lateral_displacement(self):
+        """Penalize world displacement perpendicular to the commanded heading."""
+        delta_xy = self.root_states[:, :2] - self.command_start_xy
+        lateral = (
+            -delta_xy[:, 0] * torch.sin(self.command_heading)
+            + delta_xy[:, 1] * torch.cos(self.command_heading)
+        )
+        # 10 cm drift already matters in a 2 m course.  Clipping prevents a
+        # failed episode from overwhelming all positive learning signals.
+        normalized = torch.square(lateral / 0.10)
+        return torch.clamp(normalized, max=4.0) * self._pure_sagittal_command_mask()
+
+    def _reward_lateral_axis_isolation(self):
+        lateral_cmd = torch.abs(self.commands[:, 1]) > self._current_min_abs("lin_vel_y")
+        sagittal_scale = max(abs(value) for value in self.command_ranges["lin_vel_x"])
+        yaw_scale = max(abs(value) for value in self.command_ranges["ang_vel_yaw"])
+        drift = (
+            torch.square(self.base_lin_vel[:, 0] / sagittal_scale)
+            + torch.square(self.base_ang_vel[:, 2] / yaw_scale)
+        )
+        drift = torch.clamp(drift, max=4.0)
+        return drift * lateral_cmd.float()
+
+    def _reward_lateral_yaw_rate(self):
+        yaw_scale = max(abs(value) for value in self.command_ranges["ang_vel_yaw"])
+        yaw_rate = torch.square(self.base_ang_vel[:, 2] / yaw_scale)
+        return torch.clamp(yaw_rate, max=4.0) * self._pure_lateral_command_mask()
+
+    def _reward_lateral_heading_error(self):
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        return torch.clamp(torch.square(heading_error / 0.35), max=4.0) * self._pure_lateral_command_mask()
+
+    def _reward_yaw_axis_isolation(self):
+        yaw_cmd = torch.abs(self.commands[:, 2]) > self._current_min_abs("ang_vel_yaw")
+        sagittal_scale = max(abs(value) for value in self.command_ranges["lin_vel_x"])
+        lateral_scale = max(abs(value) for value in self.command_ranges["lin_vel_y"])
+        drift = (
+            torch.square(self.base_lin_vel[:, 0] / sagittal_scale)
+            + torch.square(self.base_lin_vel[:, 1] / lateral_scale)
+        )
+        return torch.clamp(drift, max=4.0) * yaw_cmd.float()
+
+    def _reward_no_fly(self):
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        single_contact = torch.sum(contacts.float(), dim=1) == 1
+        moving = (torch.norm(self.commands[:, :2], dim=1) > 0.03) | (torch.abs(self.commands[:, 2]) > 0.1)
+        return single_contact.float() * moving.float()
+
+    def _reward_feet_air_time(self):
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.0) * contact_filt
+        self.feet_air_time += self.dt
+        rew_air_time = torch.sum((self.feet_air_time - 0.35) * first_contact, dim=1)
+        moving = (torch.norm(self.commands[:, :2], dim=1) > 0.03) | (torch.abs(self.commands[:, 2]) > 0.1)
+        rew_air_time *= moving.float()
+        self.feet_air_time *= ~contact_filt
+        return rew_air_time
+
+    def _reward_feet_slip(self):
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        feet_xy_vel = self.rigid_body_state[:, self.feet_indices, 7:9]
+        slip = torch.sum(torch.square(feet_xy_vel), dim=-1)
+        return torch.sum(slip * contacts.float(), dim=1)
+
+    def _reward_dof_pos_default(self):
+        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+
+    def _reward_stand_still(self):
+        no_motion_cmd = (
+            (torch.abs(self.commands[:, 0]) < 0.02)
+            & (torch.abs(self.commands[:, 1]) < 0.02)
+            & (torch.abs(self.commands[:, 2]) < 0.1)
+        )
+        pose_error = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+        return pose_error * no_motion_cmd.float()
