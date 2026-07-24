@@ -255,11 +255,11 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         advanced_balanced_lateral_prob = 0.45
         advanced_balanced_yaw_prob = 0.25
         advanced_final_zero_prob = 0.05
-        # The assessment is a straight race, so the final mixed stage still
-        # retains lateral/yaw robustness but gives forward walking most samples.
-        advanced_final_sagittal_prob = 0.60
-        advanced_final_lateral_prob = 0.15
-        advanced_final_yaw_prob = 0.20
+        # Keep the final stage balanced across translation and turning so
+        # straight-line accuracy does not erase lateral/yaw flexibility.
+        advanced_final_sagittal_prob = 0.35
+        advanced_final_lateral_prob = 0.30
+        advanced_final_yaw_prob = 0.30
 
         class ranges(LeggedRobotCfg.commands.ranges):
             lin_vel_x = [-0.08, 0.10]

@@ -53,6 +53,6 @@ python legged_panguin/scripts/evaluate_miniduck.py \
 
 先保证直线，再提高步幅/速度：训练命令只给 `vx > 0, vy = 0, yaw = 0`；横向速度、横向位移和 yaw 误差需进入奖励或评测。真机首次运行将 `vx` 从 0.04 m/s 逐步提高，动作幅度优先通过 `action_scale` 小步调整，并保留急停与悬空测试。
 
-接口细节见 [docs/TEAM_API.md](docs/TEAM_API.md)。
+接口细节见 [真机接口文档](../real_robot/docs/TEAM_API.md)。
 
-本项目在原 zip 训练环境上加入的首轮竞速优化、训练命令和验收阈值见 [docs/RACE_OPTIMIZATION.md](docs/RACE_OPTIMIZATION.md)。默认新实验名为 `miniduck_race_v1_12000`，不会覆盖原始稳定模型。
+本项目在原 zip 训练环境上加入的首轮竞速优化、训练命令和验收阈值见 [竞速优化说明](../real_robot/docs/RACE_OPTIMIZATION.md)。默认新实验名为 `miniduck_race_v1_12000`，不会覆盖原始稳定模型。
