@@ -16,6 +16,7 @@ from isaacgym.torch_utils import (
     torch_rand_float,
     torch_wrap_to_pi_minuspi,
 )
+from miniduck_api.action_curriculum import active_stage_for_step
 from legged_panguin.envs import LeggedRobot
 
 
@@ -241,6 +242,10 @@ class MiniDuck(LeggedRobot):
         self.extras["episode"]["max_command_y"] = float(self.command_ranges["lin_vel_y"][1])
         self.extras["episode"]["max_command_yaw"] = float(self.command_ranges["ang_vel_yaw"][1])
         self.extras["episode"]["push_max_vel_xy"] = float(self._current_push_max_vel())
+        action_stage = self._current_action_stage()
+        self.extras["episode"]["action_stage_id"] = float(
+            action_stage.index if action_stage is not None else -1
+        )
 
         self.commanded_actions[env_ids] = 0.0
         self.commanded_action_history_1[env_ids] = 0.0
@@ -409,6 +414,17 @@ class MiniDuck(LeggedRobot):
         props[trunk_id].com.y += np.random.uniform(-com_range[1], com_range[1])
         props[trunk_id].com.z += np.random.uniform(-com_range[2], com_range[2])
         return props
+
+    def _current_action_stage(self):
+        cfg = self.cfg.skill_curriculum
+        if not cfg.enabled:
+            return None
+        return active_stage_for_step(
+            self.common_step_counter,
+            cfg.start_step,
+            cfg.stage_steps,
+            cfg.max_implemented_stage,
+        )
 
     def _command_curriculum_stage(self):
         cfg = self.cfg.commands
@@ -581,6 +597,18 @@ class MiniDuck(LeggedRobot):
         _, _, yaw = euler_from_quat(self.base_quat[env_ids])
         self.command_heading[env_ids] = yaw
         self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+
+        action_stage = self._current_action_stage()
+        if action_stage is not None and action_stage.key == "emergency_stop_stand":
+            moving_mask = torch.rand(len(env_ids), device=self.device) < (
+                self.cfg.skill_curriculum.emergency_motion_probe_prob
+            )
+            if torch.any(moving_mask):
+                self._sample_sagittal_command(
+                    env_ids[moving_mask], allow_turn=False
+                )
+            return
+
         stage = self._current_command_stage()
         zero_prob = self.cfg.commands.stage_zero_prob
 
@@ -1166,6 +1194,21 @@ class MiniDuck(LeggedRobot):
         self.gym.set_actor_root_state_tensor(
             self.sim, gymtorch.unwrap_tensor(self.root_states)
         )
+
+    def _reward_emergency_stop_stability(self):
+        action_stage = self._current_action_stage()
+        if action_stage is None or action_stage.key != "emergency_stop_stand":
+            return torch.zeros(self.num_envs, device=self.device)
+        stationary_command = (
+            (torch.abs(self.commands[:, 0]) < 0.02)
+            & (torch.abs(self.commands[:, 1]) < 0.02)
+            & (torch.abs(self.commands[:, 2]) < 0.1)
+        )
+        motion_error = torch.sum(torch.square(self.base_lin_vel), dim=1)
+        motion_error += 0.25 * torch.sum(
+            torch.square(self.base_ang_vel), dim=1
+        )
+        return motion_error * stationary_command.float()
 
     def _reward_alive(self):
         return torch.ones(self.num_envs, device=self.device)

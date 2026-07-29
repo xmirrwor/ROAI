@@ -51,6 +51,16 @@ def train(args):
                 env._randomize_dynamic_properties(env_ids)
             if hasattr(env, "_resample_commands"):
                 env._resample_commands(env_ids)
+        if hasattr(env, "_current_action_stage"):
+            action_stage = env._current_action_stage()
+            if action_stage is not None:
+                env.extras.setdefault("episode", {})[
+                    "action_stage_id"
+                ] = float(action_stage.index)
+                print(
+                    "MiniDuck action curriculum stage: "
+                    f"{action_stage.index}:{action_stage.key}"
+                )
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':

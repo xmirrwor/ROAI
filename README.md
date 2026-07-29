@@ -56,3 +56,9 @@ python legged_panguin/scripts/evaluate_miniduck.py \
 接口细节见 [docs/TEAM_API.md](docs/TEAM_API.md)。
 
 本项目在原 zip 训练环境上加入的首轮竞速优化、训练命令和验收阈值见 [docs/RACE_OPTIMIZATION.md](docs/RACE_OPTIMIZATION.md)。默认新实验名为 `miniduck_race_v1_12000`，不会覆盖原始稳定模型。
+
+## 动作课程路线
+
+从稳定模型继续开发“急停站立 → 蹲起 → 动作切换 → 跌倒起身 → 斜向运动 →
+跨障碍 → 踢球”的阶段顺序、当前实现边界和验收要求见
+[docs/ACTION_CURRICULUM.md](docs/ACTION_CURRICULUM.md)。

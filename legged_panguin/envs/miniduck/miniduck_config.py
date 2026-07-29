@@ -130,6 +130,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         clock_phase_gate = 0.18
         moving_without_step_progress = 0.20
         monitor_terms = [
+            "emergency_stop_stability",
             "tracking_lin_vel_x",
             "tracking_lin_vel_y",
             "tracking_ang_vel_yaw",
@@ -152,6 +153,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
 
         class scales(LeggedRobotCfg.rewards.scales):
             termination = -250.0
+            emergency_stop_stability = -2.0
             alive = 2.2
             tracking_lin_vel = 1.0
             tracking_lin_vel_x = 1.5
@@ -270,6 +272,24 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             advanced_lin_vel_x = [-0.08, 0.16]
             advanced_lin_vel_y = [-0.20, 0.20]
             advanced_ang_vel_yaw = [-1.00, 1.00]
+
+    class skill_curriculum:
+        enabled = True
+        # The stable checkpoint is iteration 12000 and each PPO iteration has
+        # 24 simulator steps. Stage 0 therefore starts exactly at model_12000.
+        start_step = 288_000
+        stage_steps = [
+            12_000,  # emergency stop and stable stand
+            24_000,  # squat
+            24_000,  # action switching
+            48_000,  # fall recovery
+            48_000,  # diagonal motion
+            72_000,  # obstacle crossing
+            72_000,  # ball kick
+        ]
+        # Only stage 0 has all required observations, rewards and scene assets.
+        max_implemented_stage = 0
+        emergency_motion_probe_prob = 0.20
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         friction_range = [0.65, 1.10]
