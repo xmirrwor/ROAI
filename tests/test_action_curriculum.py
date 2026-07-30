@@ -54,6 +54,10 @@ class ActionCurriculumTests(unittest.TestCase):
             self.assertFalse(stage.implemented)
             self.assertTrue(stage.prerequisites)
 
+    def test_stage_zero_is_the_only_enabled_training_skill(self):
+        self.assertTrue(ACTION_STAGES[0].implemented)
+        self.assertEqual(ACTION_STAGES[0].key, "emergency_stop_stand")
+
 
 if __name__ == "__main__":
     unittest.main()

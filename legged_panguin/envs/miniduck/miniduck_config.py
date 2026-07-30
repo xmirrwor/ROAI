@@ -131,6 +131,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         moving_without_step_progress = 0.20
         monitor_terms = [
             "emergency_stop_stability",
+            "emergency_stop_success",
             "tracking_lin_vel_x",
             "tracking_lin_vel_y",
             "tracking_ang_vel_yaw",
@@ -153,7 +154,8 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
 
         class scales(LeggedRobotCfg.rewards.scales):
             termination = -250.0
-            emergency_stop_stability = -2.0
+            emergency_stop_stability = -6.0
+            emergency_stop_success = 4.0
             alive = 2.2
             tracking_lin_vel = 1.0
             tracking_lin_vel_x = 1.5
@@ -290,6 +292,9 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         # Only stage 0 has all required observations, rewards and scene assets.
         max_implemented_stage = 0
         emergency_motion_probe_prob = 0.20
+        emergency_settle_linear_mps = 0.035
+        emergency_settle_angular_rps = 0.25
+        emergency_settle_tilt_deg = 12.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         friction_range = [0.65, 1.10]

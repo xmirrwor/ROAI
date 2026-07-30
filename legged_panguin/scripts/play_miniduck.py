@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import argparse
 import os
+import sys
 import time
 
 import isaacgym  # Must be imported before torch.
@@ -13,7 +15,7 @@ from legged_panguin.utils import get_args, task_registry
 from legged_panguin.utils.helpers import get_load_path
 
 
-COMMANDS = (
+LOCOMOTION_COMMANDS = (
     ("forward", (0.10, 0.0, 0.0)),
     ("backward", (-0.06, 0.0, 0.0)),
     ("forward_turn_left", (0.08, 0.0, 0.45)),
@@ -23,6 +25,26 @@ COMMANDS = (
     ("turn_left", (0.0, 0.0, 0.80)),
     ("turn_right", (0.0, 0.0, -0.80)),
 )
+
+EMERGENCY_STOP_SEQUENCE = (
+    ("stable_stand", (0.0, 0.0, 0.0), 3.0),
+    ("forward_probe", (0.08, 0.0, 0.0), 2.0),
+    ("emergency_stop", (0.0, 0.0, 0.0), 6.0),
+    ("backward_probe", (-0.06, 0.0, 0.0), 2.0),
+    ("emergency_stop", (0.0, 0.0, 0.0), 6.0),
+)
+
+
+def _demo_args():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--demo",
+        choices=("emergency_stop", "locomotion"),
+        default="emergency_stop",
+    )
+    known, remaining = parser.parse_known_args()
+    sys.argv = [sys.argv[0], *remaining]
+    return known
 
 
 def _latest_checkpoint(train_cfg):
@@ -65,7 +87,7 @@ def _load_policy_checkpoint(runner, checkpoint_path, device):
     return checkpoint["iter"]
 
 
-def play(args):
+def play(args, demo):
     # This viewer is intentionally separate from the 4096-environment trainer.
     args.num_envs = 1
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
@@ -123,13 +145,26 @@ def play(args):
     print(f"Visualizing one MiniDuck from {loaded_checkpoint}")
 
     obs = env.get_observations()
-    command_steps = max(1, int(5.0 / env.dt))
+    if demo.demo == "emergency_stop":
+        sequence = EMERGENCY_STOP_SEQUENCE
+    else:
+        sequence = tuple((name, command, 5.0) for name, command in LOCOMOTION_COMMANDS)
+    sequence_steps = [max(1, round(duration / env.dt)) for _, _, duration in sequence]
+    cycle_steps = sum(sequence_steps)
     reload_steps = max(1, int(2.0 / env.dt))
     step = 0
+    previous_command_name = None
 
     while True:
-        command_index = (step // command_steps) % len(COMMANDS)
-        command_name, command = COMMANDS[command_index]
+        cycle_step = step % cycle_steps
+        command_index = 0
+        while cycle_step >= sequence_steps[command_index]:
+            cycle_step -= sequence_steps[command_index]
+            command_index += 1
+        command_name, command, _ = sequence[command_index]
+        if command_name != previous_command_name:
+            print(f"Demo phase: {command_name}; command={command}")
+            previous_command_name = command_name
         env.commands[0, :3] = torch.tensor(command, device=env.device)
 
         with torch.no_grad():
@@ -179,4 +214,5 @@ def play(args):
 
 
 if __name__ == "__main__":
-    play(get_args())
+    demo_args = _demo_args()
+    play(get_args(), demo_args)

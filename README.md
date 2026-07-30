@@ -62,3 +62,9 @@ python legged_panguin/scripts/evaluate_miniduck.py \
 从稳定模型继续开发“急停站立 → 蹲起 → 动作切换 → 跌倒起身 → 斜向运动 →
 跨障碍 → 踢球”的阶段顺序、当前实现边界和验收要求见
 [docs/ACTION_CURRICULUM.md](docs/ACTION_CURRICULUM.md)。
+
+阶段 0-3（截止到急停后稳定站立）的训练、专项轨迹指标、安全接口和可视化命令见
+[docs/EMERGENCY_STOP_STAGE.md](docs/EMERGENCY_STOP_STAGE.md)。
+
+2026-07-30 的实际训练过程、失败尝试、最终指标和适用边界见
+[docs/EMERGENCY_STOP_TRAINING_REPORT.md](docs/EMERGENCY_STOP_TRAINING_REPORT.md)。

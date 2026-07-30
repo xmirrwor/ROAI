@@ -23,6 +23,21 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(obs.dtype, np.float32)
         self.assertAlmostEqual(float(obs[9]), 0.2)
 
+    def test_zero_command_resets_gait_phase_to_stand(self):
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        builder = ObservationBuilder(self.cfg)
+        for _ in range(5):
+            builder.push_action(np.zeros(10, dtype=np.float32))
+        moving = builder.build(state, Command(vx=0.08))
+        self.assertNotAlmostEqual(float(moving[-1]), 0.0)
+        stopped = builder.build(state, Command())
+        self.assertAlmostEqual(float(stopped[-2]), 1.0)
+        self.assertAlmostEqual(float(stopped[-1]), 0.0)
+
     def test_race_coordinates(self):
         race = StraightLineRace(2.0)
         race.start(1.0, 0.0, 0.0, math.pi / 2)
@@ -47,6 +62,35 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(output.observation.shape, (64,))
         self.assertEqual(output.action.shape, (10,))
         np.testing.assert_allclose(output.joint_targets, self.cfg.default_actuator)
+
+    def test_agent_limits_command_and_joint_target_rate(self):
+        class UnsafePolicy:
+            def infer(self, observation):
+                self.observation = observation.copy()
+                return np.ones(10, dtype=np.float32)
+
+            def joint_targets(self, action):
+                return np.asarray(self.default, dtype=np.float32) + 10.0
+
+        policy = UnsafePolicy()
+        policy.default = self.cfg.default_actuator
+        agent = MiniDuckAgent(policy, self.cfg)
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        output = agent.act(state, Command(vx=99.0, vy=-99.0, yaw_rate=99.0))
+        self.assertAlmostEqual(
+            float(policy.observation[9]),
+            self.cfg.command_ranges["lin_vel_x"][1] * self.cfg.obs_scales["command"][0],
+        )
+        max_delta = self.cfg.nominal_motor_velocity * self.cfg.policy_dt
+        np.testing.assert_allclose(
+            output.joint_targets,
+            np.asarray(self.cfg.default_actuator) + max_delta,
+            atol=1e-6,
+        )
 
 
 if __name__ == "__main__":

@@ -30,21 +30,48 @@ class MiniDuckAgent:
         self.policy = policy
         self.config = config
         self.observations = ObservationBuilder(config)
+        self.previous_joint_targets = np.asarray(
+            config.default_actuator, dtype=np.float32
+        )
 
     def reset(self) -> None:
         self.observations.reset()
+        self.previous_joint_targets = np.asarray(
+            self.config.default_actuator, dtype=np.float32
+        )
 
     def act(self, state: RobotState, command: Command) -> AgentOutput:
         self._validate_state(state)
-        observation = self.observations.build(state, command)
+        safe_command = self._limit_command(command)
+        observation = self.observations.build(state, safe_command)
         action = np.asarray(self.policy.infer(observation), dtype=np.float32)
         if action.shape != (self.config.action_size,) or not np.isfinite(action).all():
             raise RuntimeError("policy returned an invalid action")
         targets = np.asarray(self.policy.joint_targets(action), dtype=np.float32)
         if targets.shape != (self.config.action_size,) or not np.isfinite(targets).all():
             raise RuntimeError("policy returned invalid joint targets")
+        max_delta = self.config.nominal_motor_velocity * self.config.policy_dt
+        targets = np.clip(
+            targets,
+            self.previous_joint_targets - max_delta,
+            self.previous_joint_targets + max_delta,
+        ).astype(np.float32)
+        self.previous_joint_targets = targets.copy()
         self.observations.push_action(action)
         return AgentOutput(observation, action, targets)
+
+    def _limit_command(self, command: Command) -> Command:
+        values = np.asarray(
+            [command.vx, command.vy, command.yaw_rate], dtype=np.float32
+        )
+        if not np.isfinite(values).all():
+            raise RuntimeError("command contains NaN or infinity")
+        names = ("lin_vel_x", "lin_vel_y", "ang_vel_yaw")
+        limited = [
+            float(np.clip(value, *self.config.command_ranges[name]))
+            for value, name in zip(values, names)
+        ]
+        return Command(*limited)
 
     @staticmethod
     def _validate_state(state: RobotState) -> None:

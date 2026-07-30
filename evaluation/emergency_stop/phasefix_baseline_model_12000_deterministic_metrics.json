@@ -1,0 +1,45 @@
+{
+  "run_label": "phasefix_baseline_model_12000",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Jul17_04-41-06_miniduck_stable_compressed_curriculum_resume_to_12000_from_8850/model_12000.pt",
+  "checkpoint_iteration": 12000,
+  "num_trials": 128,
+  "randomized": false,
+  "protocol": {
+    "move_s": 2.0,
+    "stop_s": 6.0,
+    "command_speed_abs_mps": 0.08,
+    "directions": "half forward, half backward",
+    "settle_hold_s": 0.5
+  },
+  "thresholds": {
+    "linear_speed_mps": 0.035,
+    "angular_speed_rps": 0.25,
+    "tilt_deg": 12.0
+  },
+  "mean_pre_stop_directed_speed_mps": 0.14476069808006287,
+  "fall_rate": 0.0,
+  "settle_success_rate": 1.0,
+  "mean_settle_time_s": 0.4676562249660492,
+  "p95_settle_time_s": 0.47999998927116394,
+  "mean_final_linear_speed_mps": 0.0027611800469458103,
+  "p95_final_linear_speed_mps": 0.003835630603134632,
+  "mean_final_angular_speed_rps": 0.012139222584664822,
+  "p95_final_angular_speed_rps": 0.017762882634997368,
+  "mean_final_tilt_deg": 9.478593826293945,
+  "p95_max_post_stop_tilt_deg": 11.93725872039795,
+  "mean_max_post_stop_drift_m": 0.036029599606990814,
+  "acceptance": {
+    "pre_stop_motion": true,
+    "fall_rate": true,
+    "settle_success_rate": true,
+    "p95_settle_time_s": true,
+    "p95_final_linear_speed": true,
+    "p95_final_angular_speed": true
+  },
+  "provenance": {
+    "aggregation": "per-step mean and 95th percentile; no smoothing",
+    "missing_policy": "post-fall samples excluded and each fall retained in trial outcomes",
+    "seed": 1
+  },
+  "acceptance_passed": true
+}

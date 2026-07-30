@@ -13,6 +13,8 @@ class PolicyConfig:
     policy_dt: float
     gait_phase_period_steps: int
     obs_scales: dict
+    command_ranges: dict
+    nominal_motor_velocity: float
     obs_size: int = 64
     action_size: int = 10
 
@@ -26,10 +28,11 @@ class PolicyConfig:
             policy_dt=float(raw["policy_dt"]),
             gait_phase_period_steps=int(raw["gait_phase_period_steps"]),
             obs_scales=raw["obs_scales"],
+            command_ranges=raw["command_ranges"],
+            nominal_motor_velocity=float(raw["nominal_motor_velocity"]),
             obs_size=int(raw.get("obs_size", 64)),
             action_size=int(raw.get("action_size", 10)),
         )
         if len(cfg.joint_names) != cfg.action_size or len(cfg.default_actuator) != cfg.action_size:
             raise ValueError("metadata joint/action dimensions are inconsistent")
         return cfg
-

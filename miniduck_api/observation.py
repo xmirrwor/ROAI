@@ -31,6 +31,14 @@ class ObservationBuilder:
 
     def build(self, state: RobotState, command: Command) -> np.ndarray:
         scales = self.config.obs_scales
+        if (
+            abs(command.vx) < 0.02
+            and abs(command.vy) < 0.02
+            and abs(command.yaw_rate) < 0.1
+        ):
+            # Training pins zero-command emergency stops to the nominal stand
+            # phase; deployment must build the same observation.
+            self.step_index = 0
         command_scale = np.asarray(scales["command"], dtype=np.float32)
         q_error = np.asarray(state.joints.position) - np.asarray(self.config.default_actuator)
         angle = 2.0 * math.pi * self.step_index / self.config.gait_phase_period_steps
@@ -47,4 +55,3 @@ class ObservationBuilder:
         if obs.shape != (self.config.obs_size,):
             raise RuntimeError(f"built observation has invalid shape {obs.shape}")
         return obs
-

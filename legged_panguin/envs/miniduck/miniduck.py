@@ -34,6 +34,9 @@ class MiniDuck(LeggedRobot):
         _, _, yaw = euler_from_quat(self.base_quat)
         self.command_heading = yaw.clone()
         self.command_start_xy = self.root_states[:, :2].clone()
+        self.emergency_probe_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
 
         max_action_delay = self.cfg.domain_rand.max_action_delay
         self.action_delay_buffer = torch.zeros(
@@ -189,9 +192,23 @@ class MiniDuck(LeggedRobot):
         return self.contact_forces[:, self.feet_indices, 2] > 1.0
 
     def _update_gait_reference_state(self):
-        self.gait_phase_steps = (
+        next_phase = (
             self.gait_phase_steps + 1
         ) % self.teacher_reference_period_steps
+        action_stage = self._current_action_stage()
+        if action_stage is not None and action_stage.key == "emergency_stop_stand":
+            stationary_command = (
+                (torch.abs(self.commands[:, 0]) < 0.02)
+                & (torch.abs(self.commands[:, 1]) < 0.02)
+                & (torch.abs(self.commands[:, 2]) < 0.1)
+            )
+            self.gait_phase_steps = torch.where(
+                stationary_command,
+                torch.zeros_like(next_phase),
+                next_phase,
+            )
+        else:
+            self.gait_phase_steps = next_phase
         contacts = self._current_foot_contacts()
         self.gait_contacts = contacts
         previous = self.gait_last_contacts
@@ -600,13 +617,18 @@ class MiniDuck(LeggedRobot):
 
         action_stage = self._current_action_stage()
         if action_stage is not None and action_stage.key == "emergency_stop_stand":
-            moving_mask = torch.rand(len(env_ids), device=self.device) < (
+            # A probe is always followed by a zero-command segment.  This makes
+            # every sampled probe an actual emergency-stop transition instead
+            # of relying on two independent resamples to happen in sequence.
+            force_stop = self.emergency_probe_active[env_ids]
+            moving_mask = (~force_stop) & (torch.rand(len(env_ids), device=self.device) < (
                 self.cfg.skill_curriculum.emergency_motion_probe_prob
-            )
+            ))
             if torch.any(moving_mask):
                 self._sample_sagittal_command(
                     env_ids[moving_mask], allow_turn=False
                 )
+            self.emergency_probe_active[env_ids] = moving_mask
             return
 
         stage = self._current_command_stage()
@@ -1209,6 +1231,30 @@ class MiniDuck(LeggedRobot):
             torch.square(self.base_ang_vel), dim=1
         )
         return motion_error * stationary_command.float()
+
+    def _reward_emergency_stop_success(self):
+        action_stage = self._current_action_stage()
+        if action_stage is None or action_stage.key != "emergency_stop_stand":
+            return torch.zeros(self.num_envs, device=self.device)
+        stationary_command = (
+            (torch.abs(self.commands[:, 0]) < 0.02)
+            & (torch.abs(self.commands[:, 1]) < 0.02)
+            & (torch.abs(self.commands[:, 2]) < 0.1)
+        )
+        linear_stable = torch.norm(self.base_lin_vel, dim=1) < (
+            self.cfg.skill_curriculum.emergency_settle_linear_mps
+        )
+        angular_stable = torch.norm(self.base_ang_vel, dim=1) < (
+            self.cfg.skill_curriculum.emergency_settle_angular_rps
+        )
+        target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target_gravity, dim=1)
+        tilt_stable = alignment > np.cos(
+            np.deg2rad(self.cfg.skill_curriculum.emergency_settle_tilt_deg)
+        )
+        return (
+            stationary_command & linear_stable & angular_stable & tilt_stable
+        ).float()
 
     def _reward_alive(self):
         return torch.ones(self.num_envs, device=self.device)
