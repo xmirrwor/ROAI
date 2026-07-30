@@ -17,7 +17,10 @@ import torch
 
 from legged_panguin import LEGGED_GYM_ROOT_DIR
 from legged_panguin.envs import *  # noqa: F401,F403
-from legged_panguin.scripts.play_miniduck import _load_policy_checkpoint
+from legged_panguin.scripts.play_miniduck import (
+    _load_policy_checkpoint,
+    _symmetric_policy_action,
+)
 from legged_panguin.utils import get_args, task_registry
 from legged_panguin.utils.helpers import get_load_path
 
@@ -25,7 +28,7 @@ from legged_panguin.utils.helpers import get_load_path
 def _evaluation_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--move_s", type=float, default=2.0)
-    parser.add_argument("--stop_s", type=float, default=6.0)
+    parser.add_argument("--stop_s", type=float, default=2.0)
     parser.add_argument("--speed_mps", type=float, default=0.08)
     parser.add_argument("--settle_linear_mps", type=float, default=0.035)
     parser.add_argument("--settle_angular_rps", type=float, default=0.25)
@@ -34,6 +37,14 @@ def _evaluation_args():
     parser.add_argument("--output_dir", type=str, default="evaluation/emergency_stop")
     parser.add_argument("--run_label", type=str, default="emergency_stop")
     parser.add_argument("--randomized", action="store_true")
+    parser.add_argument("--heading_hold_kp", type=float, default=None)
+    parser.add_argument("--heading_hold_kd", type=float, default=None)
+    parser.add_argument("--heading_hold_max", type=float, default=None)
+    parser.add_argument("--line_hold_kp", type=float, default=None)
+    parser.add_argument("--line_hold_kd", type=float, default=None)
+    parser.add_argument("--line_hold_max", type=float, default=None)
+    parser.add_argument("--cross_track_heading_kp", type=float, default=None)
+    parser.add_argument("--symmetric_inference", action="store_true")
     known, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return known
@@ -95,7 +106,7 @@ def _plot_trajectory(path, rows, metrics, move_s):
         "gray": "#555555",
     }
     with plt.style.context("default"):
-        fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.0), layout="constrained")
+        fig, axes = plt.subplots(2, 3, figsize=(14.0, 7.0), layout="constrained")
         ax = axes[0, 0]
         ax.plot(time_s, command, color=colors["gray"], linestyle=":", label="command |vx|")
         ax.plot(time_s, [r["mean_linear_speed_mps"] for r in rows], color=colors["blue"], label="mean speed")
@@ -110,14 +121,28 @@ def _plot_trajectory(path, rows, metrics, move_s):
         ax.set(ylabel="Angular speed (rad/s)", title="Body rotation")
         ax.legend()
 
-        ax = axes[1, 0]
+        ax = axes[0, 2]
         ax.plot(time_s, [r["mean_tilt_deg"] for r in rows], color=colors["blue"], label="mean")
         ax.plot(time_s, [r["p95_tilt_deg"] for r in rows], color=colors["orange"], linestyle="--", label="95th percentile")
         ax.axhline(metrics["thresholds"]["tilt_deg"], color=colors["gray"], linestyle=":", label="settled threshold")
         ax.set(xlabel="Time (s)", ylabel="Tilt from nominal (deg)", title="Body attitude")
         ax.legend()
 
+        ax = axes[1, 0]
+        ax.plot(time_s, [r["mean_abs_lateral_m"] for r in rows], color=colors["blue"], label="mean")
+        ax.plot(time_s, [r["p95_abs_lateral_m"] for r in rows], color=colors["orange"], linestyle="--", label="95th percentile")
+        ax.axhline(metrics["thresholds"]["lateral_m"], color=colors["gray"], linestyle=":", label="acceptance")
+        ax.set(xlabel="Time (s)", ylabel="Absolute lateral deviation (m)", title="Straight-line position")
+        ax.legend()
+
         ax = axes[1, 1]
+        ax.plot(time_s, [r["mean_abs_heading_deg"] for r in rows], color=colors["green"], label="mean")
+        ax.plot(time_s, [r["p95_abs_heading_deg"] for r in rows], color=colors["purple"], linestyle="--", label="95th percentile")
+        ax.axhline(metrics["thresholds"]["heading_deg"], color=colors["gray"], linestyle=":", label="acceptance")
+        ax.set(xlabel="Time (s)", ylabel="Absolute heading error (deg)", title="No-turn behavior")
+        ax.legend()
+
+        ax = axes[1, 2]
         ax.plot(time_s, [r["settled_fraction"] for r in rows], color=colors["green"], label="settled fraction")
         ax.plot(time_s, [r["fall_fraction"] for r in rows], color=colors["orange"], linestyle="--", label="fall fraction")
         ax.set(xlabel="Time (s)", ylabel="Fraction of trials", ylim=(-0.02, 1.02), title="Outcome over time")
@@ -148,6 +173,22 @@ def evaluate(args, cfg):
     env_cfg.domain_rand.push_robots = False
     env_cfg.domain_rand.max_action_delay = 0
     env_cfg.domain_rand.max_imu_delay = 0
+    if cfg.heading_hold_kp is not None:
+        env_cfg.skill_curriculum.heading_hold_kp = cfg.heading_hold_kp
+    if cfg.heading_hold_kd is not None:
+        env_cfg.skill_curriculum.heading_hold_kd = cfg.heading_hold_kd
+    if cfg.heading_hold_max is not None:
+        env_cfg.skill_curriculum.heading_hold_max_yaw_rate = cfg.heading_hold_max
+    if cfg.line_hold_kp is not None:
+        env_cfg.skill_curriculum.line_hold_kp = cfg.line_hold_kp
+    if cfg.line_hold_kd is not None:
+        env_cfg.skill_curriculum.line_hold_kd = cfg.line_hold_kd
+    if cfg.line_hold_max is not None:
+        env_cfg.skill_curriculum.line_hold_max_lateral_mps = cfg.line_hold_max
+    if cfg.cross_track_heading_kp is not None:
+        env_cfg.skill_curriculum.cross_track_heading_kp = (
+            cfg.cross_track_heading_kp
+        )
     env_cfg.commands.resampling_time = cfg.move_s + cfg.stop_s + 1.0
     if not cfg.randomized:
         env_cfg.domain_rand.randomize_friction = False
@@ -183,12 +224,17 @@ def evaluate(args, cfg):
     move_command = directions * cfg.speed_mps
     start_xy = env.root_states[:, :2].clone()
     start_yaw = _yaw_xyzw(env.root_states[:, 3:7]).clone()
+    env.command_start_xy[:] = start_xy
+    env.command_heading[:] = start_yaw
+    env.line_reference_active[:] = True
     stop_xy = torch.zeros_like(start_xy)
     fallen = torch.zeros(count, dtype=torch.bool, device=env.device)
     settle_counts = torch.zeros(count, dtype=torch.long, device=env.device)
     settle_steps = torch.full((count,), -1, dtype=torch.long, device=env.device)
     max_post_stop_tilt = torch.zeros(count, device=env.device)
     max_post_stop_drift = torch.zeros(count, device=env.device)
+    max_abs_lateral = torch.zeros(count, device=env.device)
+    max_abs_heading = torch.zeros(count, device=env.device)
     final_linear = torch.full((count,), float("nan"), device=env.device)
     final_angular = torch.full((count,), float("nan"), device=env.device)
     final_tilt = torch.full((count,), float("nan"), device=env.device)
@@ -201,8 +247,11 @@ def evaluate(args, cfg):
     hold_steps = max(1, round(cfg.settle_hold_s / env.dt))
     pre_stop_window = max(1, round(0.5 / env.dt))
     total_steps = move_steps + stop_steps
+    nominal_height = env.cfg.skill_curriculum.nominal_body_height_m
+    env.set_external_skill(env.SKILL_LOCOMOTION, nominal_height)
     env.commands[:, 0] = move_command
     env.commands[:, 1:3] = 0.0
+    env._apply_straight_heading_hold()
     env.compute_observations()
     obs = env.get_observations()
 
@@ -210,10 +259,18 @@ def evaluate(args, cfg):
         stopping = step >= move_steps
         if step == move_steps:
             stop_xy[:] = env.root_states[:, :2]
+            env.set_external_skill(env.SKILL_STAND, nominal_height)
         env.commands[:, 0] = 0.0 if stopping else move_command
         env.commands[:, 1:3] = 0.0
+        env._apply_straight_heading_hold()
+        obs[:, 9:12] = env.commands[:, :3] * env.commands_scale
+        obs[:, 62:64] = env._skill_observation()
         with torch.no_grad():
-            actions = policy(obs.detach())
+            actions = (
+                _symmetric_policy_action(policy, obs.detach())
+                if cfg.symmetric_inference
+                else policy(obs.detach())
+            )
         obs, _, _, dones, _ = env.step(actions.detach())
 
         alive_before = ~fallen
@@ -228,6 +285,17 @@ def evaluate(args, cfg):
         )
         tilt_deg = torch.rad2deg(torch.acos(alignment))
         directed_speed = directions * env.base_lin_vel[:, 0]
+        yaw = _yaw_xyzw(env.root_states[:, 3:7])
+        heading_error = torch.atan2(
+            torch.sin(yaw - start_yaw), torch.cos(yaw - start_yaw)
+        ).abs()
+        delta_xy = env.root_states[:, :2] - start_xy
+        lateral = torch.abs(
+            -delta_xy[:, 0] * torch.sin(start_yaw)
+            + delta_xy[:, 1] * torch.cos(start_yaw)
+        )
+        max_abs_lateral = torch.maximum(max_abs_lateral, lateral)
+        max_abs_heading = torch.maximum(max_abs_heading, heading_error)
 
         if move_steps - pre_stop_window <= step < move_steps:
             pre_stop_speed_sum[active] += directed_speed[active]
@@ -264,6 +332,10 @@ def evaluate(args, cfg):
             "mean_tilt_deg": _mean(tilt_deg, active),
             "p95_tilt_deg": _percentile(tilt_deg, active, 0.95),
             "mean_height_m": _mean(env.root_states[:, 2], active),
+            "mean_abs_lateral_m": _mean(lateral, active),
+            "p95_abs_lateral_m": _percentile(lateral, active, 0.95),
+            "mean_abs_heading_deg": _mean(torch.rad2deg(heading_error), active),
+            "p95_abs_heading_deg": _percentile(torch.rad2deg(heading_error), active, 0.95),
             "settled_fraction": float(settled.float().mean().item()),
             "fall_fraction": float(fallen.float().mean().item()),
         })
@@ -289,6 +361,8 @@ def evaluate(args, cfg):
             "linear_speed_mps": cfg.settle_linear_mps,
             "angular_speed_rps": cfg.settle_angular_rps,
             "tilt_deg": cfg.settle_tilt_deg,
+            "lateral_m": 0.04,
+            "heading_deg": math.degrees(0.10),
         },
         "mean_pre_stop_directed_speed_mps": float(pre_stop_speed.mean().item()),
         "fall_rate": float(fallen.float().mean().item()),
@@ -302,6 +376,10 @@ def evaluate(args, cfg):
         "mean_final_tilt_deg": _mean(final_tilt, valid_final),
         "p95_max_post_stop_tilt_deg": _percentile(max_post_stop_tilt, valid_final, 0.95),
         "mean_max_post_stop_drift_m": _mean(max_post_stop_drift, valid_final),
+        "mean_max_abs_lateral_m": _mean(max_abs_lateral, valid_final),
+        "p95_max_abs_lateral_m": _percentile(max_abs_lateral, valid_final, 0.95),
+        "mean_max_abs_heading_deg": _mean(torch.rad2deg(max_abs_heading), valid_final),
+        "p95_max_abs_heading_deg": _percentile(torch.rad2deg(max_abs_heading), valid_final, 0.95),
         "acceptance": {
             "pre_stop_motion": float(pre_stop_speed.mean().item()) >= 0.02,
             "fall_rate": float(fallen.float().mean().item()) <= 0.02,
@@ -318,11 +396,23 @@ def evaluate(args, cfg):
                 _percentile(final_angular, valid_final, 0.95) is not None
                 and _percentile(final_angular, valid_final, 0.95) <= cfg.settle_angular_rps
             ),
+            "p95_lateral_deviation": (
+                _percentile(max_abs_lateral, valid_final, 0.95) is not None
+                and _percentile(max_abs_lateral, valid_final, 0.95) <= 0.04
+            ),
+            "p95_heading_error": (
+                _percentile(max_abs_heading, valid_final, 0.95) is not None
+                and _percentile(max_abs_heading, valid_final, 0.95) <= 0.10
+            ),
         },
         "provenance": {
             "aggregation": "per-step mean and 95th percentile; no smoothing",
             "missing_policy": "post-fall samples excluded and each fall retained in trial outcomes",
             "seed": args.seed,
+            "heading_hold_kp": env.cfg.skill_curriculum.heading_hold_kp,
+            "heading_hold_kd": env.cfg.skill_curriculum.heading_hold_kd,
+            "heading_hold_max": env.cfg.skill_curriculum.heading_hold_max_yaw_rate,
+            "symmetric_inference": cfg.symmetric_inference,
         },
     }
     result["acceptance_passed"] = all(result["acceptance"].values())
@@ -352,6 +442,12 @@ def evaluate(args, cfg):
             ),
             "max_post_stop_drift_m": (
                 float(max_post_stop_drift[index].item()) if valid_final[index] else ""
+            ),
+            "max_abs_lateral_m": (
+                float(max_abs_lateral[index].item()) if valid_final[index] else ""
+            ),
+            "max_abs_heading_deg": (
+                float(torch.rad2deg(max_abs_heading[index]).item()) if valid_final[index] else ""
             ),
         })
 

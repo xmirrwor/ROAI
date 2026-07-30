@@ -71,7 +71,16 @@ class MiniDuckAgent:
             float(np.clip(value, *self.config.command_ranges[name]))
             for value, name in zip(values, names)
         ]
-        return Command(*limited)
+        body_height = command.body_height_m
+        if body_height is not None:
+            if not math.isfinite(body_height):
+                raise RuntimeError("body-height command contains NaN or infinity")
+            body_height = float(np.clip(
+                body_height,
+                self.config.squat_body_height_m,
+                self.config.nominal_body_height_m,
+            ))
+        return Command(*limited, skill=command.skill, body_height_m=body_height)
 
     @staticmethod
     def _validate_state(state: RobotState) -> None:

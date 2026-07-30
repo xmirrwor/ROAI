@@ -6,8 +6,12 @@ import isaacgym  # noqa: F401
 import torch
 
 from legged_panguin.envs.miniduck.miniduck_config import (
+    JOINT_MIRROR_PERMUTATION,
+    JOINT_MIRROR_SIGNS,
     MiniDuckFlatCfg,
     MiniDuckFlatCfgPPO,
+    SYMMETRY_OBS_PERMUTATION,
+    SYMMETRY_OBS_SIGNS,
 )
 from rsl_rl.modules.actor_critic import ActorCritic
 
@@ -24,6 +28,22 @@ JOINT_ORDER = [
     "right_knee",
     "right_ankle",
 ]
+
+
+class SymmetricActor(torch.nn.Module):
+    def __init__(self, actor):
+        super().__init__()
+        self.actor = actor
+        self.register_buffer("obs_permutation", torch.tensor(SYMMETRY_OBS_PERMUTATION))
+        self.register_buffer("obs_signs", torch.tensor(SYMMETRY_OBS_SIGNS))
+        self.register_buffer("action_permutation", torch.tensor(JOINT_MIRROR_PERMUTATION))
+        self.register_buffer("action_signs", torch.tensor(JOINT_MIRROR_SIGNS))
+
+    def forward(self, obs):
+        action = self.actor(obs)
+        mirrored_action = self.actor(obs[:, self.obs_permutation] * self.obs_signs)
+        unmirrored_action = mirrored_action[:, self.action_permutation] * self.action_signs
+        return 0.5 * (action + unmirrored_action)
 
 
 def build_actor_critic():
@@ -45,6 +65,7 @@ def build_metadata(checkpoint_path, output_onnx):
     commands = MiniDuckFlatCfg.commands
     obs_scales = MiniDuckFlatCfg.normalization.obs_scales
     domain_rand = MiniDuckFlatCfg.domain_rand
+    skill_curriculum = MiniDuckFlatCfg.skill_curriculum
 
     default_joint_angles = init_state.default_joint_angles
     default_actuator = [default_joint_angles[name] for name in JOINT_ORDER]
@@ -62,6 +83,15 @@ def build_metadata(checkpoint_path, output_onnx):
         "decimation": control.decimation,
         "gait_phase_period_steps": 27,
         "nominal_motor_velocity": domain_rand.nominal_motor_velocity,
+        "nominal_body_height_m": skill_curriculum.nominal_body_height_m,
+        "squat_body_height_m": skill_curriculum.squat_body_height_m,
+        "heading_hold_kp": skill_curriculum.heading_hold_kp,
+        "heading_hold_kd": skill_curriculum.heading_hold_kd,
+        "heading_hold_max_yaw_rate": skill_curriculum.heading_hold_max_yaw_rate,
+        "line_hold_kp": skill_curriculum.line_hold_kp,
+        "line_hold_kd": skill_curriculum.line_hold_kd,
+        "line_hold_max_lateral_mps": skill_curriculum.line_hold_max_lateral_mps,
+        "heading_hold_stop_s": commands.resampling_time,
         "command_ranges": {
             "lin_vel_x": list(commands.ranges.lin_vel_x),
             "lin_vel_y": list(commands.ranges.lin_vel_y),
@@ -102,8 +132,14 @@ def build_metadata(checkpoint_path, output_onnx):
             "action_t": [32, 42],
             "action_t_minus_1": [42, 52],
             "action_t_minus_2": [52, 62],
-            "gait_phase_cos_sin": [62, 64],
+            "gait_phase_or_skill_target": [62, 64],
         },
+        "skill_encoding": {
+            "locomotion": "[cos(gait_phase), sin(gait_phase)]",
+            "stand": [1.0, 0.0],
+            "squat": "[1 - 2 * normalized_depth, 1]",
+        },
+        "symmetric_inference": False,
     }
 
 

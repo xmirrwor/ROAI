@@ -27,7 +27,7 @@ def _symmetry_layout():
             offset + index for index in JOINT_MIRROR_PERMUTATION
         ]
         signs[offset:offset + 10] = JOINT_MIRROR_SIGNS
-    signs[62:64] = [1.0, -1.0]  # gait phase is stored as cos/sin
+    signs[62:64] = [1.0, 1.0]  # stage 4/5 uses the final slot as a skill gate
     return permutation, signs
 
 
@@ -113,7 +113,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         tracking_lin_sigma = 0.015
         tracking_ang_sigma = 0.06
         soft_dof_pos_limit = 0.98
-        base_height_target = 0.115629099309
+        base_height_target = 0.143
         max_contact_force = 120.0
         termination_height = 0.08
         termination_body_angle = 0.85
@@ -129,6 +129,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         foot_lift_target = 0.025
         clock_phase_gate = 0.18
         moving_without_step_progress = 0.20
+        skill_height_sigma = 5.0e-4
         monitor_terms = [
             "emergency_stop_stability",
             "emergency_stop_success",
@@ -149,13 +150,24 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "lateral_heading_error",
             "sagittal_heading_error",
             "sagittal_lateral_displacement",
+            "sagittal_velocity_tracking",
+            "action_switch_velocity_progress",
+            "action_switch_velocity_lag",
+            "straight_yaw_rate",
+            "skill_height_tracking",
+            "skill_height_error",
+            "squat_pose_tracking",
+            "squat_pose_error",
+            "skill_transition_success",
+            "skill_stability",
+            "skill_double_support",
             "yaw_twist_without_step",
         ]
 
         class scales(LeggedRobotCfg.rewards.scales):
-            termination = -250.0
+            termination = -500.0
             emergency_stop_stability = -6.0
-            emergency_stop_success = 4.0
+            emergency_stop_success = 6.0
             alive = 2.2
             tracking_lin_vel = 1.0
             tracking_lin_vel_x = 1.5
@@ -202,8 +214,19 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             sagittal_axis_isolation = -0.40
             # Unlike axis isolation, these terms penalize accumulated drift
             # over a command segment and directly match the 2 m race metric.
-            sagittal_heading_error = -3.0
-            sagittal_lateral_displacement = -2.0
+            sagittal_heading_error = -8.0
+            sagittal_lateral_displacement = -10.0
+            straight_yaw_rate = -3.0
+            sagittal_velocity_tracking = 12.0
+            action_switch_velocity_progress = 12.0
+            action_switch_velocity_lag = -4.0
+            skill_height_tracking = 6.0
+            skill_height_error = -6.0
+            squat_pose_tracking = 0.0
+            squat_pose_error = 0.0
+            skill_transition_success = 3.0
+            skill_stability = -5.0
+            skill_double_support = 2.0
             lateral_axis_isolation = -0.55
             lateral_yaw_rate = -1.6
             lateral_heading_error = -2.2
@@ -218,7 +241,8 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
 
     class commands(LeggedRobotCfg.commands):
         heading_command = False
-        resampling_time = 4.0
+        # All skill segments are two seconds, including the emergency-stop hold.
+        resampling_time = 2.0
         zero_prob = 0.05
         sagittal_prob = 0.40
         lateral_prob = 0.30
@@ -277,24 +301,40 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
 
     class skill_curriculum:
         enabled = True
+        forced_stage = None
         # The stable checkpoint is iteration 12000 and each PPO iteration has
         # 24 simulator steps. Stage 0 therefore starts exactly at model_12000.
         start_step = 288_000
         stage_steps = [
-            12_000,  # emergency stop and stable stand
-            24_000,  # squat
+            33_600,  # best straight/stop checkpoint is model_13400
+            12_000,  # squat; selected model_13900 after checkpoint evaluation
             24_000,  # action switching
             48_000,  # fall recovery
             48_000,  # diagonal motion
             72_000,  # obstacle crossing
             72_000,  # ball kick
         ]
-        # Only stage 0 has all required observations, rewards and scene assets.
-        max_implemented_stage = 0
-        emergency_motion_probe_prob = 0.20
+        # Stages 0-2 have dedicated observations, rewards and evaluations.
+        max_implemented_stage = 2
+        emergency_motion_probe_prob = 0.75
         emergency_settle_linear_mps = 0.035
         emergency_settle_angular_rps = 0.25
         emergency_settle_tilt_deg = 12.0
+        straight_heading_tolerance_rad = 0.10
+        straight_lateral_tolerance_m = 0.04
+        nominal_body_height_m = 0.143
+        squat_body_height_m = 0.132
+        squat_start_body_height_m = 0.138
+        height_tolerance_m = 0.006
+        height_transition_s = 0.60
+        action_switch_backward_prob = 0.75
+        heading_hold_kp = 2.5
+        heading_hold_kd = 0.30
+        heading_hold_max_yaw_rate = 0.45
+        cross_track_heading_kp = 0.0
+        line_hold_kp = 2.0
+        line_hold_kd = 0.35
+        line_hold_max_lateral_mps = 0.16
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         friction_range = [0.65, 1.10]
@@ -366,11 +406,11 @@ class MiniDuckFlatCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 2.0e-3
-        learning_rate = 5.0e-5
+        learning_rate = 2.0e-6
         schedule = 'fixed'
         max_grad_norm = 0.20
         min_policy_std = 0.08
-        symmetry_loss_coef = 0.12
+        symmetry_loss_coef = 0.1
         symmetry_obs_permutation = SYMMETRY_OBS_PERMUTATION
         symmetry_obs_signs = SYMMETRY_OBS_SIGNS
         symmetry_action_permutation = JOINT_MIRROR_PERMUTATION
@@ -380,3 +420,4 @@ class MiniDuckFlatCfgPPO(LeggedRobotCfgPPO):
         run_name = ''
         experiment_name = 'flat_miniduck'
         max_iterations = 2000
+        save_interval = 10

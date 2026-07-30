@@ -25,14 +25,14 @@ ACTION_STAGES = (
         1,
         "squat",
         "Track a commanded body-height profile while keeping both feet stable.",
-        False,
+        True,
         ("height_command", "per_env_height_target"),
     ),
     ActionStage(
         2,
         "action_switch",
         "Switch between stand, squat and locomotion without losing balance.",
-        False,
+        True,
         ("skill_conditioning", "transition_sampler"),
     ),
     ActionStage(

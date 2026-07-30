@@ -16,11 +16,15 @@ from isaacgym.torch_utils import (
     torch_rand_float,
     torch_wrap_to_pi_minuspi,
 )
-from miniduck_api.action_curriculum import active_stage_for_step
+from miniduck_api.action_curriculum import ACTION_STAGES, active_stage_for_step
 from legged_panguin.envs import LeggedRobot
 
 
 class MiniDuck(LeggedRobot):
+    SKILL_STAND = 0
+    SKILL_LOCOMOTION = 1
+    SKILL_SQUAT = 2
+
     def _init_buffers(self):
         super()._init_buffers()
         self.base_command_ranges = {
@@ -35,6 +39,24 @@ class MiniDuck(LeggedRobot):
         self.command_heading = yaw.clone()
         self.command_start_xy = self.root_states[:, :2].clone()
         self.emergency_probe_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.line_reference_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.skill_mode = torch.full(
+            (self.num_envs,), self.SKILL_STAND, dtype=torch.long, device=self.device
+        )
+        nominal_height = self.cfg.skill_curriculum.nominal_body_height_m
+        self.target_base_height = torch.full(
+            (self.num_envs,), nominal_height, device=self.device
+        )
+        self.skill_start_height = self.target_base_height.clone()
+        self.skill_goal_height = self.target_base_height.clone()
+        self.skill_transition_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.squat_target_low = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
 
@@ -188,6 +210,127 @@ class MiniDuck(LeggedRobot):
         )
         return torch.stack((torch.cos(phase), torch.sin(phase)), dim=-1)
 
+    def _skill_observation(self):
+        features = self._gait_phase_observation()
+        stand = self.skill_mode == self.SKILL_STAND
+        squat = self.skill_mode == self.SKILL_SQUAT
+        features[stand, 0] = 1.0
+        features[stand, 1] = 0.0
+        if torch.any(squat):
+            cfg = self.cfg.skill_curriculum
+            span = max(cfg.nominal_body_height_m - cfg.squat_body_height_m, 1.0e-6)
+            depth = torch.clamp(
+                (cfg.nominal_body_height_m - self.target_base_height[squat]) / span,
+                min=0.0,
+                max=1.0,
+            )
+            features[squat, 0] = 1.0 - 2.0 * depth
+            features[squat, 1] = 1.0
+        return features
+
+    def _schedule_skill_height(self, env_ids, goal_height):
+        if len(env_ids) == 0:
+            return
+        self.skill_start_height[env_ids] = self.target_base_height[env_ids]
+        if torch.is_tensor(goal_height):
+            self.skill_goal_height[env_ids] = goal_height
+        else:
+            self.skill_goal_height[env_ids] = float(goal_height)
+        self.skill_transition_step[env_ids] = 0
+
+    def _current_squat_goal(self):
+        cfg = self.cfg.skill_curriculum
+        stage_one_start = cfg.start_step + cfg.stage_steps[0]
+        progress = self._ramp_progress(
+            self.common_step_counter,
+            stage_one_start,
+            cfg.stage_steps[1],
+        )
+        return cfg.squat_start_body_height_m + (
+            cfg.squat_body_height_m - cfg.squat_start_body_height_m
+        ) * progress
+
+    def _update_skill_targets(self):
+        transition_steps = max(
+            1,
+            round(self.cfg.skill_curriculum.height_transition_s / self.dt),
+        )
+        progress = torch.clamp(
+            self.skill_transition_step.float() / transition_steps,
+            min=0.0,
+            max=1.0,
+        )
+        # Smoothstep keeps the requested squat/stand transition free of velocity jumps.
+        blend = progress * progress * (3.0 - 2.0 * progress)
+        self.target_base_height = self.skill_start_height + blend * (
+            self.skill_goal_height - self.skill_start_height
+        )
+        self.skill_transition_step = torch.clamp(
+            self.skill_transition_step + 1,
+            max=transition_steps,
+        )
+
+    def _apply_straight_heading_hold(self):
+        if not self._stage_is("emergency_stop_stand", "squat", "action_switch"):
+            return
+        active = self.line_reference_active
+        if not torch.any(active):
+            return
+        self.commands[active, 1:3] = 0.0
+        moving = active & (
+            torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x")
+        )
+        if not torch.any(moving):
+            return
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        cfg = self.cfg.skill_curriculum
+        delta_xy = self.root_states[:, :2] - self.command_start_xy
+        lateral = (
+            -delta_xy[:, 0] * torch.sin(self.command_heading)
+            + delta_xy[:, 1] * torch.cos(self.command_heading)
+        )
+        world_velocity = self.root_states[:, 7:9]
+        lateral_velocity = (
+            -world_velocity[:, 0] * torch.sin(self.command_heading)
+            + world_velocity[:, 1] * torch.cos(self.command_heading)
+        )
+        lateral_correction = -cfg.line_hold_kp * lateral - (
+            cfg.line_hold_kd * lateral_velocity
+        )
+        self.commands[moving, 1] = torch.clamp(
+            lateral_correction[moving],
+            -cfg.line_hold_max_lateral_mps,
+            cfg.line_hold_max_lateral_mps,
+        )
+        cross_track = (
+            cfg.cross_track_heading_kp
+            * lateral
+            * torch.sign(self.commands[:, 0])
+        )
+        correction = -cfg.heading_hold_kp * heading_error - cross_track - (
+            cfg.heading_hold_kd * self.base_ang_vel[:, 2]
+        )
+        self.commands[moving, 2] = torch.clamp(
+            correction[moving],
+            -cfg.heading_hold_max_yaw_rate,
+            cfg.heading_hold_max_yaw_rate,
+        )
+
+    def set_external_skill(self, mode, target_height=None, env_ids=None):
+        """Set a deterministic skill target for evaluation and visualization."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        self.skill_mode[env_ids] = int(mode)
+        if target_height is None:
+            target_height = self.cfg.skill_curriculum.nominal_body_height_m
+        self.target_base_height[env_ids] = float(target_height)
+        self.skill_start_height[env_ids] = float(target_height)
+        self.skill_goal_height[env_ids] = float(target_height)
+        self.skill_transition_step[env_ids] = max(
+            1, round(self.cfg.skill_curriculum.height_transition_s / self.dt)
+        )
+
     def _current_foot_contacts(self):
         return self.contact_forces[:, self.feet_indices, 2] > 1.0
 
@@ -196,14 +339,19 @@ class MiniDuck(LeggedRobot):
             self.gait_phase_steps + 1
         ) % self.teacher_reference_period_steps
         action_stage = self._current_action_stage()
-        if action_stage is not None and action_stage.key == "emergency_stop_stand":
+        if action_stage is not None and action_stage.key in (
+            "emergency_stop_stand",
+            "squat",
+            "action_switch",
+        ):
             stationary_command = (
                 (torch.abs(self.commands[:, 0]) < 0.02)
                 & (torch.abs(self.commands[:, 1]) < 0.02)
                 & (torch.abs(self.commands[:, 2]) < 0.1)
             )
+            freeze_phase = stationary_command | (self.skill_mode != self.SKILL_LOCOMOTION)
             self.gait_phase_steps = torch.where(
-                stationary_command,
+                freeze_phase,
                 torch.zeros_like(next_phase),
                 next_phase,
             )
@@ -276,6 +424,15 @@ class MiniDuck(LeggedRobot):
         self.gait_first_contacts[env_ids] = 0.0
         self.gait_contact_switch[env_ids] = 0.0
         self.current_teacher_reference[env_ids] = 0.0
+        self.emergency_probe_active[env_ids] = False
+        self.line_reference_active[env_ids] = False
+        self.skill_mode[env_ids] = self.SKILL_STAND
+        nominal_height = self.cfg.skill_curriculum.nominal_body_height_m
+        self.target_base_height[env_ids] = nominal_height
+        self.skill_start_height[env_ids] = nominal_height
+        self.skill_goal_height[env_ids] = nominal_height
+        self.skill_transition_step[env_ids] = 0
+        self.squat_target_low[env_ids] = False
         self._randomize_dynamic_properties(env_ids)
 
         self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
@@ -301,6 +458,9 @@ class MiniDuck(LeggedRobot):
             dim=-1,
         )
         self.imu_history[:, env_ids] = initial_imu.unsqueeze(0)
+        # LeggedRobot samples commands before MiniDuck-specific buffers are reset.
+        # Resample once more so the command and high-level skill stay consistent.
+        self._resample_commands(env_ids)
 
     def _domain_rand_strength(self):
         warmup = self.cfg.domain_rand.curriculum_warmup_steps
@@ -436,6 +596,11 @@ class MiniDuck(LeggedRobot):
         cfg = self.cfg.skill_curriculum
         if not cfg.enabled:
             return None
+        if cfg.forced_stage is not None:
+            forced_stage = int(cfg.forced_stage)
+            if not 0 <= forced_stage <= cfg.max_implemented_stage:
+                raise ValueError("forced_stage exceeds the implemented curriculum")
+            return ACTION_STAGES[forced_stage]
         return active_stage_for_step(
             self.common_step_counter,
             cfg.start_step,
@@ -596,6 +761,11 @@ class MiniDuck(LeggedRobot):
 
     def _current_push_max_vel(self):
         cfg = self.cfg.domain_rand
+        action_stage = self._current_action_stage()
+        if action_stage is not None and action_stage.key == "squat":
+            return 0.0
+        if action_stage is not None and action_stage.key == "action_switch":
+            return min(0.02, cfg.advanced_max_push_vel_xy)
         if not cfg.curriculum_push_robots:
             return cfg.max_push_vel_xy if cfg.push_robots else 0.0
         progress = self._ramp_progress(
@@ -610,26 +780,122 @@ class MiniDuck(LeggedRobot):
             return
 
         self._update_command_range_schedule()
-        self.commands[env_ids, :3] = 0.0
-        _, _, yaw = euler_from_quat(self.base_quat[env_ids])
-        self.command_heading[env_ids] = yaw
-        self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
-
         action_stage = self._current_action_stage()
         if action_stage is not None and action_stage.key == "emergency_stop_stand":
             # A probe is always followed by a zero-command segment.  This makes
             # every sampled probe an actual emergency-stop transition instead
             # of relying on two independent resamples to happen in sequence.
             force_stop = self.emergency_probe_active[env_ids]
+            self.commands[env_ids, :3] = 0.0
             moving_mask = (~force_stop) & (torch.rand(len(env_ids), device=self.device) < (
                 self.cfg.skill_curriculum.emergency_motion_probe_prob
             ))
+            new_reference = ~force_stop
+            if torch.any(new_reference):
+                reference_ids = env_ids[new_reference]
+                _, _, yaw = euler_from_quat(self.base_quat[reference_ids])
+                self.command_heading[reference_ids] = yaw
+                self.command_start_xy[reference_ids] = self.root_states[reference_ids, :2]
+            self.line_reference_active[env_ids] = force_stop | moving_mask
+            self.skill_mode[env_ids] = self.SKILL_STAND
             if torch.any(moving_mask):
+                self.skill_mode[env_ids[moving_mask]] = self.SKILL_LOCOMOTION
                 self._sample_sagittal_command(
                     env_ids[moving_mask], allow_turn=False
                 )
+            self._schedule_skill_height(
+                env_ids, self.cfg.skill_curriculum.nominal_body_height_m
+            )
             self.emergency_probe_active[env_ids] = moving_mask
             return
+
+        if action_stage is not None and action_stage.key == "squat":
+            self.commands[env_ids, :3] = 0.0
+            new_reference = ~self.line_reference_active[env_ids]
+            if torch.any(new_reference):
+                reference_ids = env_ids[new_reference]
+                _, _, yaw = euler_from_quat(self.base_quat[reference_ids])
+                self.command_heading[reference_ids] = yaw
+                self.command_start_xy[reference_ids] = self.root_states[reference_ids, :2]
+            self.line_reference_active[env_ids] = True
+            self.squat_target_low[env_ids] = ~self.squat_target_low[env_ids]
+            low = self.squat_target_low[env_ids]
+            self.skill_mode[env_ids] = self.SKILL_STAND
+            self.skill_mode[env_ids[low]] = self.SKILL_SQUAT
+            goals = torch.full(
+                (len(env_ids),),
+                self.cfg.skill_curriculum.nominal_body_height_m,
+                device=self.device,
+            )
+            goals[low] = self._current_squat_goal()
+            self._schedule_skill_height(env_ids, goals)
+            return
+
+        if action_stage is not None and action_stage.key == "action_switch":
+            previous_mode = self.skill_mode[env_ids].clone()
+            sample = torch.rand(len(env_ids), device=self.device)
+            next_mode = torch.full_like(previous_mode, self.SKILL_SQUAT)
+            next_mode[sample < 0.75] = self.SKILL_STAND
+            next_mode[sample < 0.50] = self.SKILL_LOCOMOTION
+            repeated = next_mode == previous_mode
+            repeated_locomotion = repeated & (previous_mode == self.SKILL_LOCOMOTION)
+            stationary_fallback = torch.where(
+                torch.rand(len(env_ids), device=self.device) < 0.5,
+                torch.full_like(previous_mode, self.SKILL_STAND),
+                torch.full_like(previous_mode, self.SKILL_SQUAT),
+            )
+            next_mode = torch.where(
+                repeated_locomotion, stationary_fallback, next_mode
+            )
+            next_mode = torch.where(
+                repeated & ~repeated_locomotion,
+                torch.full_like(previous_mode, self.SKILL_LOCOMOTION),
+                next_mode,
+            )
+            moving_mask = next_mode == self.SKILL_LOCOMOTION
+            # Keep one episode-level line reference across walk, stop, stand,
+            # and squat transitions. Resetting it at every stationary switch
+            # would permit a slowly rotating "straight" trajectory.
+            new_reference = ~self.line_reference_active[env_ids]
+            if torch.any(new_reference):
+                reference_ids = env_ids[new_reference]
+                _, _, yaw = euler_from_quat(self.base_quat[reference_ids])
+                self.command_heading[reference_ids] = yaw
+                self.command_start_xy[reference_ids] = self.root_states[reference_ids, :2]
+            self.commands[env_ids, :3] = 0.0
+            self.skill_mode[env_ids] = next_mode
+            self.line_reference_active[env_ids] = True
+            if torch.any(moving_mask):
+                moving_ids = env_ids[moving_mask]
+                self._sample_sagittal_command(moving_ids, allow_turn=False)
+                backward = torch.rand(len(moving_ids), device=self.device) < (
+                    self.cfg.skill_curriculum.action_switch_backward_prob
+                )
+                magnitudes = torch.abs(self.commands[moving_ids, 0])
+                negative_max = abs(self.command_ranges["lin_vel_x"][0])
+                self.commands[moving_ids, 0] = torch.where(
+                    backward,
+                    -torch.clamp(magnitudes, max=negative_max),
+                    magnitudes,
+                )
+            goals = torch.full(
+                (len(env_ids),),
+                self.cfg.skill_curriculum.nominal_body_height_m,
+                device=self.device,
+            )
+            goals[next_mode == self.SKILL_SQUAT] = (
+                self.cfg.skill_curriculum.squat_body_height_m
+            )
+            self._schedule_skill_height(env_ids, goals)
+            self.emergency_probe_active[env_ids] = False
+            return
+
+        self.commands[env_ids, :3] = 0.0
+        _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+        self.command_heading[env_ids] = yaw
+        self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+        self.line_reference_active[env_ids] = False
+        self.skill_mode[env_ids] = self.SKILL_LOCOMOTION
 
         stage = self._current_command_stage()
         zero_prob = self.cfg.commands.stage_zero_prob
@@ -892,7 +1158,7 @@ class MiniDuck(LeggedRobot):
                 self.commanded_actions,
                 self.commanded_action_history_1,
                 self.commanded_action_history_2,
-                self._gait_phase_observation(),
+                self._skill_observation(),
             ),
             dim=-1,
         )
@@ -962,6 +1228,38 @@ class MiniDuck(LeggedRobot):
         y_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
         yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
         return (x_active | y_active | yaw_active).float()
+
+    def _stage_is(self, *keys):
+        stage = self._current_action_stage()
+        return stage is not None and stage.key in keys
+
+    def _stationary_skill_mask(self):
+        return (self.skill_mode != self.SKILL_LOCOMOTION).float()
+
+    def _squat_skill_mask(self):
+        return (self.skill_mode == self.SKILL_SQUAT).float()
+
+    def _line_tracking_mask(self):
+        if self._stage_is("emergency_stop_stand", "squat", "action_switch"):
+            return self.line_reference_active.float()
+        return self._pure_sagittal_command_mask()
+
+    def _line_penalty_ramp(self):
+        if not self._stage_is("emergency_stop_stand"):
+            return 1.0
+        cfg = self.cfg.skill_curriculum
+        progress = (
+            self.common_step_counter - cfg.start_step
+        ) / max(cfg.stage_steps[0], 1)
+        return min(max(progress, 0.25), 1.0)
+
+    def _line_direction_weight(self):
+        backward = self.commands[:, 0] <= -self._current_min_abs("lin_vel_x")
+        return torch.where(
+            backward,
+            torch.full_like(self.commands[:, 0], 2.0),
+            torch.ones_like(self.commands[:, 0]),
+        )
 
     def _pure_yaw_command_mask(self):
         yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
@@ -1200,6 +1498,8 @@ class MiniDuck(LeggedRobot):
     def _post_physics_step_callback(self):
         super()._post_physics_step_callback()
         self._update_command_range_schedule()
+        self._update_skill_targets()
+        self._apply_straight_heading_hold()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._update_gait_reference_state()
         push_max_vel = self._current_push_max_vel()
@@ -1252,9 +1552,91 @@ class MiniDuck(LeggedRobot):
         tilt_stable = alignment > np.cos(
             np.deg2rad(self.cfg.skill_curriculum.emergency_settle_tilt_deg)
         )
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch.abs(torch_wrap_to_pi_minuspi(yaw - self.command_heading))
+        delta_xy = self.root_states[:, :2] - self.command_start_xy
+        lateral = torch.abs(
+            -delta_xy[:, 0] * torch.sin(self.command_heading)
+            + delta_xy[:, 1] * torch.cos(self.command_heading)
+        )
+        line_stable = (~self.line_reference_active) | (
+            (heading_error < self.cfg.skill_curriculum.straight_heading_tolerance_rad)
+            & (lateral < self.cfg.skill_curriculum.straight_lateral_tolerance_m)
+        )
         return (
-            stationary_command & linear_stable & angular_stable & tilt_stable
+            stationary_command & linear_stable & angular_stable & tilt_stable & line_stable
         ).float()
+
+    def _reward_skill_height_tracking(self):
+        if not self._stage_is("squat", "action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        error = torch.square(self.root_states[:, 2] - self.target_base_height)
+        return torch.exp(-error / self.cfg.rewards.skill_height_sigma)
+
+    def _reward_skill_height_error(self):
+        if not self._stage_is("squat", "action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        normalized = torch.abs(
+            self.root_states[:, 2] - self.target_base_height
+        ) / 0.02
+        return torch.clamp(normalized, max=3.0)
+
+    def _desired_squat_pose(self):
+        cfg = self.cfg.skill_curriculum
+        span = max(cfg.nominal_body_height_m - cfg.squat_body_height_m, 1.0e-6)
+        depth = torch.clamp(
+            (cfg.nominal_body_height_m - self.target_base_height) / span,
+            min=0.0,
+            max=1.0,
+        ).unsqueeze(1)
+        full_depth_delta = torch.tensor(
+            [0.0, 0.0, 0.15, 0.20, 0.12, 0.0, 0.0, -0.15, 0.20, 0.12],
+            device=self.device,
+        )
+        return self.default_dof_pos + depth * full_depth_delta.unsqueeze(0)
+
+    def _reward_squat_pose_tracking(self):
+        target = self._desired_squat_pose()
+        error = torch.mean(torch.square(self.dof_pos - target), dim=1)
+        return torch.exp(-error / 0.005) * self._squat_skill_mask()
+
+    def _reward_squat_pose_error(self):
+        target = self._desired_squat_pose()
+        error = torch.mean(torch.square(self.dof_pos - target), dim=1) / 0.01
+        return torch.clamp(error, max=3.0) * self._squat_skill_mask()
+
+    def _reward_skill_transition_success(self):
+        if not self._stage_is("squat", "action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        height_ok = torch.abs(
+            self.root_states[:, 2] - self.target_base_height
+        ) < self.cfg.skill_curriculum.height_tolerance_m
+        target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target_gravity, dim=1)
+        tilt_ok = alignment > np.cos(
+            np.deg2rad(self.cfg.skill_curriculum.emergency_settle_tilt_deg)
+        )
+        contacts = torch.sum(self.gait_contacts.float(), dim=1) == 2
+        stationary_ok = torch.norm(self.base_lin_vel[:, :2], dim=1) < 0.035
+        return (
+            height_ok
+            & tilt_ok
+            & contacts
+            & (stationary_ok | (self.skill_mode == self.SKILL_LOCOMOTION))
+        ).float()
+
+    def _reward_skill_stability(self):
+        if not self._stage_is("squat", "action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        motion = torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1)
+        motion += 0.25 * torch.sum(torch.square(self.base_ang_vel), dim=1)
+        return motion * self._stationary_skill_mask()
+
+    def _reward_skill_double_support(self):
+        if not self._stage_is("squat", "action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        contacts = torch.sum(self.gait_contacts.float(), dim=1) == 2
+        return contacts.float() * self._stationary_skill_mask()
 
     def _reward_alive(self):
         return torch.ones(self.num_envs, device=self.device)
@@ -1416,8 +1798,44 @@ class MiniDuck(LeggedRobot):
         """Penalize accumulated yaw drift during a straight command segment."""
         _, _, yaw = euler_from_quat(self.base_quat)
         heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
-        normalized = torch.square(heading_error / 0.20)
-        return torch.clamp(normalized, max=4.0) * self._pure_sagittal_command_mask()
+        normalized = torch.square(heading_error / 0.10)
+        return (
+            torch.clamp(normalized, max=4.0)
+            * self._line_tracking_mask()
+            * self._line_penalty_ramp()
+            * self._line_direction_weight()
+        )
+
+    def _reward_sagittal_velocity_tracking(self):
+        """Prevent the straightness objectives from being solved by standing still."""
+        active = (
+            self.line_reference_active.float()
+            * (torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x")).float()
+            if self._stage_is("emergency_stop_stand", "action_switch")
+            else self._pure_sagittal_command_mask()
+        )
+        error = torch.square(self.commands[:, 0] - self.base_lin_vel[:, 0])
+        return torch.exp(-error / 9.0e-4) * active
+
+    def _reward_action_switch_velocity_progress(self):
+        if not self._stage_is("action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        progress, _ = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        return progress * self.line_reference_active.float()
+
+    def _reward_action_switch_velocity_lag(self):
+        if not self._stage_is("action_switch"):
+            return torch.zeros(self.num_envs, device=self.device)
+        _, lag = self._axis_progress_and_lag(
+            self.commands[:, 0],
+            self.base_lin_vel[:, 0],
+            self._current_min_abs("lin_vel_x"),
+        )
+        return lag * self.line_reference_active.float()
 
     def _reward_sagittal_lateral_displacement(self):
         """Penalize world displacement perpendicular to the commanded heading."""
@@ -1426,10 +1844,25 @@ class MiniDuck(LeggedRobot):
             -delta_xy[:, 0] * torch.sin(self.command_heading)
             + delta_xy[:, 1] * torch.cos(self.command_heading)
         )
-        # 10 cm drift already matters in a 2 m course.  Clipping prevents a
-        # failed episode from overwhelming all positive learning signals.
-        normalized = torch.square(lateral / 0.10)
-        return torch.clamp(normalized, max=4.0) * self._pure_sagittal_command_mask()
+        # Four centimetres is the acceptance tolerance for a complete move-stop
+        # segment. Keep gradient out to 16 cm so severe backward drift is not a
+        # flat local optimum, while still bounding failed episodes.
+        normalized = torch.square(lateral / 0.04)
+        return (
+            torch.clamp(normalized, max=16.0)
+            * self._line_tracking_mask()
+            * self._line_penalty_ramp()
+            * self._line_direction_weight()
+        )
+
+    def _reward_straight_yaw_rate(self):
+        normalized = torch.square(self.base_ang_vel[:, 2] / 0.25)
+        return (
+            torch.clamp(normalized, max=4.0)
+            * self._line_tracking_mask()
+            * self._line_penalty_ramp()
+            * self._line_direction_weight()
+        )
 
     def _reward_lateral_axis_isolation(self):
         lateral_cmd = torch.abs(self.commands[:, 1]) > self._current_min_abs("lin_vel_y")
@@ -1487,7 +1920,8 @@ class MiniDuck(LeggedRobot):
         return torch.sum(slip * contacts.float(), dim=1)
 
     def _reward_dof_pos_default(self):
-        return torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+        pose_error = torch.sum(torch.square(self.dof_pos - self.default_dof_pos), dim=1)
+        return pose_error * (1.0 - self._squat_skill_mask())
 
     def _reward_stand_still(self):
         no_motion_cmd = (
@@ -1496,4 +1930,11 @@ class MiniDuck(LeggedRobot):
             & (torch.abs(self.commands[:, 2]) < 0.1)
         )
         pose_error = torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
-        return pose_error * no_motion_cmd.float()
+        return pose_error * no_motion_cmd.float() * (1.0 - self._squat_skill_mask())
+
+    def _reward_base_height(self):
+        base_height = torch.mean(
+            self.root_states[:, 2].unsqueeze(1) - self.measured_heights,
+            dim=1,
+        )
+        return torch.square(base_height - self.target_base_height)

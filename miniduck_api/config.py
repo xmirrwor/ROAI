@@ -15,6 +15,12 @@ class PolicyConfig:
     obs_scales: dict
     command_ranges: dict
     nominal_motor_velocity: float
+    nominal_body_height_m: float = 0.143
+    squat_body_height_m: float = 0.132
+    heading_hold_kp: float = 2.5
+    heading_hold_kd: float = 0.30
+    heading_hold_max_yaw_rate: float = 0.45
+    heading_hold_stop_s: float = 2.0
     obs_size: int = 64
     action_size: int = 10
 
@@ -30,6 +36,12 @@ class PolicyConfig:
             obs_scales=raw["obs_scales"],
             command_ranges=raw["command_ranges"],
             nominal_motor_velocity=float(raw["nominal_motor_velocity"]),
+            nominal_body_height_m=float(raw.get("nominal_body_height_m", 0.143)),
+            squat_body_height_m=float(raw.get("squat_body_height_m", 0.132)),
+            heading_hold_kp=float(raw.get("heading_hold_kp", 2.5)),
+            heading_hold_kd=float(raw.get("heading_hold_kd", 0.30)),
+            heading_hold_max_yaw_rate=float(raw.get("heading_hold_max_yaw_rate", 0.45)),
+            heading_hold_stop_s=float(raw.get("heading_hold_stop_s", 2.0)),
             obs_size=int(raw.get("obs_size", 64)),
             action_size=int(raw.get("action_size", 10)),
         )

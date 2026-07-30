@@ -68,3 +68,6 @@ python legged_panguin/scripts/evaluate_miniduck.py \
 
 2026-07-30 的实际训练过程、失败尝试、最终指标和适用边界见
 [docs/EMERGENCY_STOP_TRAINING_REPORT.md](docs/EMERGENCY_STOP_TRAINING_REPORT.md)。
+
+阶段 4（蹲起）和阶段 5（动作切换）的检查点、128 环境验收结果、复现命令及
+已知边界见 [docs/STAGE4_STAGE5_TRAINING_REPORT.md](docs/STAGE4_STAGE5_TRAINING_REPORT.md)。

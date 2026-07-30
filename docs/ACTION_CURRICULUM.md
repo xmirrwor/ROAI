@@ -14,21 +14,26 @@
 `MiniDuckFlatCfg.skill_curriculum`。阶段从稳定模型 `model_12000.pt` 对应的
 第 288000 个 simulator step 开始，保持现有 64 维观测和 10 维动作契约。
 
-## 本次实现范围
+## 当前实现范围
 
-当前只开放阶段 0：急停后稳定站立。命令采样由 80% 零速度命令和 20%
-低速前后运动探针组成，使训练能观察“运动后切换到停止命令”的场景。新增稳定性
-reward 仅在阶段 0 且命令为零时惩罚机身线速度和角速度。
+当前开放阶段 0-2，对应急停、蹲起和动作切换。`max_implemented_stage = 2`
+仍是安全门；训练步数越过阶段 2 后会继续停留在动作切换，不会进入尚未实现的
+跌倒起身。
 
-`max_implemented_stage = 0` 是安全门。即使训练步数越过后续阶段的计划边界，
-训练也会继续停留在阶段 0，直到相应场景、观测、reward 和验收测试完成。
+| 内部阶段 | 训练内容 | 主要实现 |
+|---|---|---|
+| 0 | 前进/后退后 2 秒急停 | 成对的移动/停止采样、整段直线参考、稳定与停止成功 reward |
+| 1 | 站立与蹲起 | 0.143 m/0.132 m 高度目标、0.6 秒平滑转场、高度/稳定/双脚支撑 reward |
+| 2 | 动作切换 | 站立/移动/蹲起随机切换、同一 episode 直线参考、切换与速度 reward |
+
+64 维观测的最后两维用于技能条件：移动时为步态相位，站立时为 `[1, 0]`，
+蹲起时为高度深度编码。动作维数仍为 10。`forced_stage` 默认是 `None`；它只用于
+专项续训时锁定已实现阶段，提交和常规训练不得长期保持为具体数字。
 
 ## 后续阶段前置条件
 
 | 阶段 | 尚需实现 |
 |---|---|
-| 蹲起 | 高度命令、逐环境高度目标、蹲起轨迹与双脚稳定 reward |
-| 动作切换 | 不破坏 64 维部署契约的 skill conditioning、转场采样器 |
 | 跌倒起身 | 俯卧/仰卧 reset 分布、恢复期间 termination 规则、恢复超时指标 |
 | 斜向组合运动 | 同时采样 `vx/vy`、组合跟踪与漂移评测 |
 | 跨障碍 | 障碍地形、前方高度观测、足端净空和碰撞指标 |
@@ -39,20 +44,29 @@ smoke test 声称机器人已经掌握该技能。
 
 ## 最小验证
 
-从同学的稳定 checkpoint 续训 1 次 iteration：
+服务器环境变量配置完成后，先运行单元测试：
 
 ```bash
-python legged_panguin/scripts/train.py \
-  --task miniduck_flat --headless --num_envs 8 --max_iterations 1 \
-  --resume \
-  --load_run Jul17_04-41-06_miniduck_stable_compressed_curriculum_resume_to_12000_from_8850 \
-  --checkpoint 12000 \
-  --run_name action_curriculum_stage0_smoke
+python -m unittest discover -s tests -v
 ```
 
-日志必须出现：
+动作切换检查点的确定性评估：
 
-```text
-MiniDuck action curriculum stage: 0:emergency_stop_stand
-Learning iteration 12000/12001
+```bash
+python legged_panguin/scripts/evaluate_skill_stages.py \
+  --task miniduck_flat --headless --num_envs 128 \
+  --load_run Jul30_21-20-57_action_switch_stage5_symmetry_to14800 \
+  --checkpoint 14780 --protocol action_switch --segment_s 2 \
+  --run_label stage5_final_14780_action_switch_128
 ```
+
+可视化同一检查点：
+
+```bash
+python legged_panguin/scripts/play_miniduck.py \
+  --task miniduck_flat \
+  --load_run Jul30_21-20-57_action_switch_stage5_symmetry_to14800 \
+  --checkpoint 14780 --demo action_switch
+```
+
+训练结果和未通过项见 `docs/STAGE4_STAGE5_TRAINING_REPORT.md`。

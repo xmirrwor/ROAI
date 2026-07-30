@@ -8,7 +8,7 @@ from miniduck_api.action_curriculum import (
 
 
 START_STEP = 288_000
-STAGE_STEPS = [12_000, 24_000, 24_000, 48_000, 48_000, 72_000, 72_000]
+STAGE_STEPS = [33_600, 12_000, 24_000, 48_000, 48_000, 72_000, 72_000]
 
 
 class ActionCurriculumTests(unittest.TestCase):
@@ -49,14 +49,16 @@ class ActionCurriculumTests(unittest.TestCase):
         self.assertEqual(planned.key, "ball_kick")
         self.assertEqual(active.key, "emergency_stop_stand")
 
-    def test_future_stages_declare_prerequisites(self):
-        for stage in ACTION_STAGES[1:]:
+    def test_unimplemented_future_stages_declare_prerequisites(self):
+        for stage in ACTION_STAGES[3:]:
             self.assertFalse(stage.implemented)
             self.assertTrue(stage.prerequisites)
 
-    def test_stage_zero_is_the_only_enabled_training_skill(self):
-        self.assertTrue(ACTION_STAGES[0].implemented)
-        self.assertEqual(ACTION_STAGES[0].key, "emergency_stop_stand")
+    def test_first_three_training_skills_are_enabled(self):
+        self.assertEqual(
+            [stage.key for stage in ACTION_STAGES if stage.implemented],
+            ["emergency_stop_stand", "squat", "action_switch"],
+        )
 
 
 if __name__ == "__main__":

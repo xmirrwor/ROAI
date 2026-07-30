@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, Sequence
 
 
 JOINT_COUNT = 10
+
+
+class SkillMode(str, Enum):
+    """High-level skill selector encoded in the final two policy inputs."""
+
+    AUTO = "auto"
+    LOCOMOTION = "locomotion"
+    STAND = "stand"
+    SQUAT = "squat"
 
 
 def _vector(name: str, values: Sequence[float], size: int) -> tuple[float, ...]:
@@ -16,11 +26,13 @@ def _vector(name: str, values: Sequence[float], size: int) -> tuple[float, ...]:
 
 @dataclass(frozen=True)
 class Command:
-    """Body velocity command: forward, left and counter-clockwise."""
+    """Velocity plus an optional high-level posture command."""
 
     vx: float = 0.0
     vy: float = 0.0
     yaw_rate: float = 0.0
+    skill: SkillMode = SkillMode.AUTO
+    body_height_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,4 +70,3 @@ class RobotTransport(Protocol):
     def read_state(self) -> RobotState: ...
     def write_joint_targets(self, targets_rad: Sequence[float]) -> None: ...
     def disable_torque(self) -> None: ...
-

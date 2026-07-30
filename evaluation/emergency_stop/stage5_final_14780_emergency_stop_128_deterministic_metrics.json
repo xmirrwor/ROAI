@@ -1,0 +1,57 @@
+{
+  "run_label": "stage5_final_14780_emergency_stop_128",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Jul30_21-20-57_action_switch_stage5_symmetry_to14800/model_14780.pt",
+  "checkpoint_iteration": 14780,
+  "num_trials": 128,
+  "randomized": false,
+  "protocol": {
+    "move_s": 2.0,
+    "stop_s": 2.0,
+    "command_speed_abs_mps": 0.08,
+    "directions": "half forward, half backward",
+    "settle_hold_s": 0.5
+  },
+  "thresholds": {
+    "linear_speed_mps": 0.035,
+    "angular_speed_rps": 0.25,
+    "tilt_deg": 12.0,
+    "lateral_m": 0.04,
+    "heading_deg": 5.729577951308233
+  },
+  "mean_pre_stop_directed_speed_mps": 0.03562823683023453,
+  "fall_rate": 0.0,
+  "settle_success_rate": 1.0,
+  "mean_settle_time_s": 0.30671876668930054,
+  "p95_settle_time_s": 0.3999999761581421,
+  "mean_final_linear_speed_mps": 0.002842566929757595,
+  "p95_final_linear_speed_mps": 0.004792842082679272,
+  "mean_final_angular_speed_rps": 0.027185561135411263,
+  "p95_final_angular_speed_rps": 0.0396939180791378,
+  "mean_final_tilt_deg": 6.847502708435059,
+  "p95_max_post_stop_tilt_deg": 7.914608955383301,
+  "mean_max_post_stop_drift_m": 0.018020248040556908,
+  "mean_max_abs_lateral_m": 0.03262297809123993,
+  "p95_max_abs_lateral_m": 0.038834091275930405,
+  "mean_max_abs_heading_deg": 2.3187694549560547,
+  "p95_max_abs_heading_deg": 3.410506010055542,
+  "acceptance": {
+    "pre_stop_motion": true,
+    "fall_rate": true,
+    "settle_success_rate": true,
+    "p95_settle_time_s": true,
+    "p95_final_linear_speed": true,
+    "p95_final_angular_speed": true,
+    "p95_lateral_deviation": true,
+    "p95_heading_error": true
+  },
+  "provenance": {
+    "aggregation": "per-step mean and 95th percentile; no smoothing",
+    "missing_policy": "post-fall samples excluded and each fall retained in trial outcomes",
+    "seed": null,
+    "heading_hold_kp": 2.5,
+    "heading_hold_kd": 0.3,
+    "heading_hold_max": 0.45,
+    "symmetric_inference": false
+  },
+  "acceptance_passed": true
+}

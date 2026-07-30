@@ -5,7 +5,7 @@ import numpy as np
 
 from miniduck_api.benchmark import StraightLineRace
 from miniduck_api.config import PolicyConfig
-from miniduck_api.contracts import Command, ImuSample, JointState, RobotState
+from miniduck_api.contracts import Command, ImuSample, JointState, RobotState, SkillMode
 from miniduck_api.observation import ObservationBuilder
 from miniduck_api.agent import MiniDuckAgent
 
@@ -37,6 +37,34 @@ class InterfaceTests(unittest.TestCase):
         stopped = builder.build(state, Command())
         self.assertAlmostEqual(float(stopped[-2]), 1.0)
         self.assertAlmostEqual(float(stopped[-1]), 0.0)
+
+    def test_squat_command_encodes_target_without_changing_contract(self):
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        builder = ObservationBuilder(self.cfg)
+        obs = builder.build(
+            state,
+            Command(
+                skill=SkillMode.SQUAT,
+                body_height_m=self.cfg.squat_body_height_m,
+            ),
+        )
+        self.assertEqual(obs.shape, (64,))
+        self.assertAlmostEqual(float(obs[-2]), -1.0)
+        self.assertAlmostEqual(float(obs[-1]), 1.0)
+
+    def test_straight_command_uses_gyro_heading_hold(self):
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0.2], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        builder = ObservationBuilder(self.cfg)
+        obs = builder.build(state, Command(vx=0.08))
+        self.assertLess(float(obs[11]), 0.0)
 
     def test_race_coordinates(self):
         race = StraightLineRace(2.0)
