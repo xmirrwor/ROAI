@@ -50,14 +50,20 @@ class ActionCurriculumTests(unittest.TestCase):
         self.assertEqual(active.key, "emergency_stop_stand")
 
     def test_unimplemented_future_stages_declare_prerequisites(self):
-        for stage in ACTION_STAGES[3:]:
+        for stage in ACTION_STAGES[5:]:
             self.assertFalse(stage.implemented)
             self.assertTrue(stage.prerequisites)
 
     def test_first_three_training_skills_are_enabled(self):
         self.assertEqual(
             [stage.key for stage in ACTION_STAGES if stage.implemented],
-            ["emergency_stop_stand", "squat", "action_switch"],
+            [
+                "emergency_stop_stand",
+                "squat",
+                "action_switch",
+                "fall_recovery",
+                "diagonal_motion",
+            ],
         )
 
 

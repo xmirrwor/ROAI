@@ -15,6 +15,7 @@ class SkillMode(str, Enum):
     LOCOMOTION = "locomotion"
     STAND = "stand"
     SQUAT = "squat"
+    RECOVERY = "recovery"
 
 
 def _vector(name: str, values: Sequence[float], size: int) -> tuple[float, ...]:

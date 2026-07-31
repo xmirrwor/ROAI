@@ -23,8 +23,8 @@ from legged_panguin.envs.miniduck.miniduck_config import (
 
 
 LOCOMOTION_COMMANDS = (
-    ("forward", (0.10, 0.0, 0.0)),
-    ("backward", (-0.06, 0.0, 0.0)),
+    ("forward", (0.12, 0.0, 0.0)),
+    ("backward", (-0.08, 0.0, 0.0)),
     ("forward_turn_left", (0.08, 0.0, 0.45)),
     ("forward_turn_right", (0.08, 0.0, -0.45)),
     ("left", (0.0, 0.16, 0.0)),
@@ -35,9 +35,9 @@ LOCOMOTION_COMMANDS = (
 
 EMERGENCY_STOP_SEQUENCE = (
     ("stable_stand", (0.0, 0.0, 0.0), 2.0),
-    ("forward_probe", (0.08, 0.0, 0.0), 2.0),
+    ("forward_probe", (0.10, 0.0, 0.0), 5.0),
     ("emergency_stop", (0.0, 0.0, 0.0), 2.0),
-    ("backward_probe", (-0.06, 0.0, 0.0), 2.0),
+    ("backward_probe", (-0.08, 0.0, 0.0), 5.0),
     ("emergency_stop", (0.0, 0.0, 0.0), 2.0),
 )
 
@@ -49,12 +49,19 @@ SQUAT_SEQUENCE = (
 
 ACTION_SWITCH_SEQUENCE = (
     ("stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal"),
-    ("forward", (0.08, 0.0, 0.0), 2.0, 1, "nominal"),
+    ("forward", (0.12, 0.0, 0.0), 5.0, 1, "nominal"),
     ("stop", (0.0, 0.0, 0.0), 2.0, 0, "nominal"),
     ("squat", (0.0, 0.0, 0.0), 2.0, 2, "squat"),
     ("stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal"),
-    ("backward", (-0.06, 0.0, 0.0), 2.0, 1, "nominal"),
+    ("backward", (-0.08, 0.0, 0.0), 5.0, 1, "nominal"),
     ("stop", (0.0, 0.0, 0.0), 2.0, 0, "nominal"),
+)
+
+DIAGONAL_SEQUENCE = (
+    ("forward_left", (0.10, 0.08, 0.0), 5.0, 1, "nominal"),
+    ("forward_right", (0.10, -0.08, 0.0), 5.0, 1, "nominal"),
+    ("backward_left", (-0.08, 0.08, 0.0), 5.0, 1, "nominal"),
+    ("backward_right", (-0.08, -0.08, 0.0), 5.0, 1, "nominal"),
 )
 
 
@@ -62,11 +69,24 @@ def _demo_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--demo",
-        choices=("emergency_stop", "locomotion", "squat", "action_switch"),
+        choices=(
+            "emergency_stop",
+            "locomotion",
+            "squat",
+            "action_switch",
+            "fall_recovery",
+            "diagonal_motion",
+        ),
         default="emergency_stop",
     )
     parser.add_argument("--symmetric_inference", action="store_true")
     parser.add_argument("--symmetry_blend", type=float, default=0.0)
+    parser.add_argument("--fixed_camera", action="store_true")
+    parser.add_argument("--locomotion_checkpoint_path", default=None)
+    parser.add_argument("--locomotion_blend", type=float, default=0.0)
+    parser.add_argument("--heading_hold_kp", type=float, default=None)
+    parser.add_argument("--cross_track_heading_kp", type=float, default=None)
+    parser.add_argument("--checkpoint_path_override", default=None)
     known, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return known
@@ -137,6 +157,8 @@ def _symmetric_policy_action(policy, obs, direct_action=None):
 def play(args, demo):
     if not 0.0 <= demo.symmetry_blend <= 1.0:
         raise ValueError("symmetry_blend must be between 0 and 1")
+    if not 0.0 <= demo.locomotion_blend <= 1.0:
+        raise ValueError("locomotion_blend must be between 0 and 1")
     # This viewer is intentionally separate from the 4096-environment trainer.
     args.num_envs = 1
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
@@ -162,7 +184,17 @@ def play(args, demo):
     env_cfg.domain_rand.accel_bias = 0.0
     env_cfg.domain_rand.push_robots = False
     env_cfg.commands.resampling_time = 1000.0
-    env_cfg.viewer.pos = [0.45, -0.45, 0.35]
+    if demo.heading_hold_kp is not None:
+        env_cfg.skill_curriculum.heading_hold_kp = demo.heading_hold_kp
+    if demo.cross_track_heading_kp is not None:
+        env_cfg.skill_curriculum.cross_track_heading_kp = (
+            demo.cross_track_heading_kp
+        )
+    if demo.demo == "fall_recovery":
+        env_cfg.skill_curriculum.forced_stage = 3
+    elif demo.demo == "diagonal_motion":
+        env_cfg.skill_curriculum.forced_stage = 4
+    env_cfg.viewer.pos = [1.20, -1.20, 0.65] if demo.fixed_camera else [0.45, -0.45, 0.35]
     env_cfg.viewer.lookat = [0.0, 0.0, 0.13]
 
     train_cfg.runner.resume = False
@@ -171,7 +203,11 @@ def play(args, demo):
     )
     train_cfg.runner.checkpoint = -1
 
-    initial_checkpoint = _checkpoint_path(train_cfg, args)
+    initial_checkpoint = (
+        os.path.abspath(demo.checkpoint_path_override)
+        if demo.checkpoint_path_override
+        else _checkpoint_path(train_cfg, args)
+    )
     env, _ = task_registry.make_env(
         name=args.task,
         args=args,
@@ -191,6 +227,25 @@ def play(args, demo):
     )
     env.common_step_counter = checkpoint_iteration * runner.num_steps_per_env
     policy = runner.get_inference_policy(device=env.device)
+    locomotion_policy = None
+    if demo.locomotion_checkpoint_path:
+        locomotion_runner, _ = task_registry.make_alg_runner(
+            env=env,
+            name=args.task,
+            args=args,
+            train_cfg=train_cfg,
+            log_root=None,
+        )
+        _load_policy_checkpoint(
+            locomotion_runner,
+            demo.locomotion_checkpoint_path,
+            env.device,
+        )
+        locomotion_policy = locomotion_runner.get_inference_policy(device=env.device)
+        print(
+            "Locomotion expert: "
+            f"{demo.locomotion_checkpoint_path}; blend={demo.locomotion_blend:.2f}"
+        )
     loaded_checkpoint = initial_checkpoint
     print(f"Visualizing one MiniDuck from {loaded_checkpoint}")
 
@@ -201,8 +256,12 @@ def play(args, demo):
         sequence = tuple((name, command, 5.0, 1, "nominal") for name, command in LOCOMOTION_COMMANDS)
     elif demo.demo == "squat":
         sequence = SQUAT_SEQUENCE
-    else:
+    elif demo.demo == "action_switch":
         sequence = ACTION_SWITCH_SEQUENCE
+    elif demo.demo == "diagonal_motion":
+        sequence = DIAGONAL_SEQUENCE
+    else:
+        sequence = (("fall_recovery", (0.0, 0.0, 0.0), 1000.0, 3, "nominal"),)
     sequence_steps = [max(1, round(item[2] / env.dt)) for item in sequence]
     cycle_steps = sum(sequence_steps)
     reload_steps = max(1, int(2.0 / env.dt))
@@ -236,6 +295,7 @@ def play(args, demo):
         env.commands[0, :3] = torch.tensor(command, device=env.device)
         env.skill_mode[:] = skill_mode
         env._apply_straight_heading_hold()
+        env._apply_diagonal_heading_hold()
         obs[:, 9:12] = env.commands[:, :3] * env.commands_scale
         obs[:, 62:64] = env._skill_observation()
 
@@ -253,6 +313,13 @@ def play(args, demo):
                 )
             else:
                 actions = direct_actions
+            if locomotion_policy is not None and skill_mode == env.SKILL_LOCOMOTION:
+                expert_actions = locomotion_policy(obs.detach())
+                actions = torch.lerp(
+                    actions,
+                    expert_actions,
+                    demo.locomotion_blend,
+                )
         obs, _, _, dones, _ = env.step(actions.detach())
 
         if dones[0]:
@@ -260,22 +327,27 @@ def play(args, demo):
             env.line_reference_active[:] = False
             previous_command_name = None
 
-        robot_position = env.root_states[0, :3].detach().cpu().tolist()
-        env.set_camera(
-            [
-                robot_position[0] + 0.45,
-                robot_position[1] - 0.45,
-                robot_position[2] + 0.20,
-            ],
-            [
-                robot_position[0],
-                robot_position[1],
-                robot_position[2],
-            ],
-        )
+        if not demo.fixed_camera:
+            robot_position = env.root_states[0, :3].detach().cpu().tolist()
+            env.set_camera(
+                [
+                    robot_position[0] + 0.45,
+                    robot_position[1] - 0.45,
+                    robot_position[2] + 0.20,
+                ],
+                [
+                    robot_position[0],
+                    robot_position[1],
+                    robot_position[2],
+                ],
+            )
 
         if step % reload_steps == 0:
-            latest_checkpoint = _checkpoint_path(train_cfg, args)
+            latest_checkpoint = (
+                initial_checkpoint
+                if demo.checkpoint_path_override
+                else _checkpoint_path(train_cfg, args)
+            )
             if latest_checkpoint != loaded_checkpoint:
                 # Give the trainer time to finish flushing a newly-created file.
                 time.sleep(0.2)

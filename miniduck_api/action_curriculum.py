@@ -39,14 +39,14 @@ ACTION_STAGES = (
         3,
         "fall_recovery",
         "Recover from sampled prone and supine poses before timeout.",
-        False,
+        True,
         ("recovery_reset_distribution", "recovery_termination_rule"),
     ),
     ActionStage(
         4,
         "diagonal_motion",
         "Track simultaneous forward and lateral velocity commands.",
-        False,
+        True,
         ("combined_command_sampler",),
     ),
     ActionStage(

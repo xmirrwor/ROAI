@@ -1,0 +1,24 @@
+{
+  "run_label": "stage7_path_12320",
+  "protocol_name": "diagonal_motion",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Jul31_16-42-54_stage7_diagonal_path_to12400/model_12320.pt",
+  "checkpoint_iteration": 12320,
+  "num_trials": 128,
+  "duration_s": 5.0,
+  "randomized": false,
+  "fall_rate": 0.0390625,
+  "mean_directed_speed_mps": 0.15705765783786774,
+  "p95_max_cross_track_m": 0.14527113735675812,
+  "p95_max_heading_deg": 12.133140357647834,
+  "acceptance": {
+    "fall_rate_at_most_15pct": true,
+    "mean_directed_speed_at_least_0p04": true,
+    "p95_cross_track_at_most_0p12": false,
+    "p95_heading_at_most_20deg": true
+  },
+  "acceptance_passed": false,
+  "provenance": {
+    "aggregation": "raw per-step means and per-trial outcomes; no smoothing",
+    "failed_trials": "retained"
+  }
+}

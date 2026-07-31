@@ -1,0 +1,18 @@
+{
+  "run_label": "stage6_true_balanced_15420",
+  "protocol_name": "fall_recovery",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Jul31_16-26-44_stage6_true_supine_to15560/model_15420.pt",
+  "checkpoint_iteration": 15420,
+  "num_trials": 128,
+  "randomized": false,
+  "success_rate": 0.5546875,
+  "mean_success_time_s": 0.6780281662940979,
+  "acceptance": {
+    "success_rate_at_least_50pct": true
+  },
+  "acceptance_passed": true,
+  "provenance": {
+    "aggregation": "raw per-step means and per-trial outcomes; no smoothing",
+    "failed_trials": "retained"
+  }
+}

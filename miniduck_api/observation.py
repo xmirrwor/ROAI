@@ -76,7 +76,9 @@ class ObservationBuilder:
         command_scale = np.asarray(scales["command"], dtype=np.float32)
         q_error = np.asarray(state.joints.position) - np.asarray(self.config.default_actuator)
         angle = 2.0 * math.pi * self.step_index / self.config.gait_phase_period_steps
-        if skill == SkillMode.SQUAT:
+        if skill == SkillMode.RECOVERY:
+            skill_features = np.asarray([-1.0, -1.0])
+        elif skill == SkillMode.SQUAT:
             target_height = (
                 self.config.squat_body_height_m
                 if command.body_height_m is None

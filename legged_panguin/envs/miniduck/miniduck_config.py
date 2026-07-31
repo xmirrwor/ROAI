@@ -161,6 +161,14 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "skill_transition_success",
             "skill_stability",
             "skill_double_support",
+            "recovery_alignment",
+            "recovery_height",
+            "recovery_success",
+            "recovery_stability",
+            "diagonal_velocity_tracking",
+            "diagonal_progress",
+            "diagonal_heading_error",
+            "diagonal_path_error",
             "yaw_twist_without_step",
         ]
 
@@ -217,9 +225,9 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             sagittal_heading_error = -8.0
             sagittal_lateral_displacement = -10.0
             straight_yaw_rate = -3.0
-            sagittal_velocity_tracking = 12.0
-            action_switch_velocity_progress = 12.0
-            action_switch_velocity_lag = -4.0
+            sagittal_velocity_tracking = 16.0
+            action_switch_velocity_progress = 20.0
+            action_switch_velocity_lag = -8.0
             skill_height_tracking = 6.0
             skill_height_error = -6.0
             squat_pose_tracking = 0.0
@@ -227,6 +235,14 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             skill_transition_success = 3.0
             skill_stability = -5.0
             skill_double_support = 2.0
+            recovery_alignment = 15.0
+            recovery_height = 12.0
+            recovery_success = 40.0
+            recovery_stability = -2.0
+            diagonal_velocity_tracking = 14.0
+            diagonal_progress = 8.0
+            diagonal_heading_error = -3.0
+            diagonal_path_error = -6.0
             lateral_axis_isolation = -0.55
             lateral_yaw_rate = -1.6
             lateral_heading_error = -2.2
@@ -301,7 +317,11 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
 
     class skill_curriculum:
         enabled = True
-        forced_stage = None
+        forced_stage = (
+            int(os.environ["MINIDUCK_FORCED_STAGE"])
+            if os.environ.get("MINIDUCK_FORCED_STAGE") is not None
+            else None
+        )
         # The stable checkpoint is iteration 12000 and each PPO iteration has
         # 24 simulator steps. Stage 0 therefore starts exactly at model_12000.
         start_step = 288_000
@@ -314,8 +334,8 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             72_000,  # obstacle crossing
             72_000,  # ball kick
         ]
-        # Stages 0-2 have dedicated observations, rewards and evaluations.
-        max_implemented_stage = 2
+        # Stages 0-4 have dedicated observations, samplers and evaluations.
+        max_implemented_stage = 4
         emergency_motion_probe_prob = 0.75
         emergency_settle_linear_mps = 0.035
         emergency_settle_angular_rps = 0.25
@@ -327,7 +347,9 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         squat_start_body_height_m = 0.138
         height_tolerance_m = 0.006
         height_transition_s = 0.60
-        action_switch_backward_prob = 0.75
+        action_switch_backward_prob = 0.50
+        action_switch_forward_speed_range = [0.10, 0.13]
+        action_switch_backward_speed_range = [-0.09, -0.07]
         heading_hold_kp = 2.5
         heading_hold_kd = 0.30
         heading_hold_max_yaw_rate = 0.45
@@ -335,6 +357,20 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         line_hold_kp = 2.0
         line_hold_kd = 0.35
         line_hold_max_lateral_mps = 0.16
+        recovery_start_height_m = 0.09
+        recovery_pitch_start_range_rad = [0.50, 0.70]
+        recovery_pitch_range_rad = [0.50, 0.70]
+        recovery_supine_prob = float(
+            os.environ.get("MINIDUCK_RECOVERY_SUPINE_PROB", "0.5")
+        )
+        recovery_curriculum_start_step = 362_640  # stage-6 model_15110
+        recovery_curriculum_ramp_steps = 1
+        recovery_timeout_s = 5.0
+        recovery_success_hold_s = 0.50
+        recovery_upright_tilt_deg = 18.0
+        recovery_upright_height_m = 0.125
+        diagonal_forward_speed_range = [0.08, 0.12]
+        diagonal_lateral_speed_range = [0.06, 0.10]
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         friction_range = [0.65, 1.10]
@@ -406,7 +442,7 @@ class MiniDuckFlatCfgPPO(LeggedRobotCfgPPO):
 
     class algorithm(LeggedRobotCfgPPO.algorithm):
         entropy_coef = 2.0e-3
-        learning_rate = 2.0e-6
+        learning_rate = float(os.environ.get("MINIDUCK_LEARNING_RATE", "2.0e-6"))
         schedule = 'fixed'
         max_grad_norm = 0.20
         min_policy_std = 0.08

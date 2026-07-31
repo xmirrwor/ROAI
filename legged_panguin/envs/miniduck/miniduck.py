@@ -24,6 +24,7 @@ class MiniDuck(LeggedRobot):
     SKILL_STAND = 0
     SKILL_LOCOMOTION = 1
     SKILL_SQUAT = 2
+    SKILL_RECOVERY = 3
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -59,6 +60,10 @@ class MiniDuck(LeggedRobot):
         self.squat_target_low = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self.recovery_elapsed_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.recovery_upright_steps = torch.zeros_like(self.recovery_elapsed_steps)
 
         max_action_delay = self.cfg.domain_rand.max_action_delay
         self.action_delay_buffer = torch.zeros(
@@ -214,6 +219,7 @@ class MiniDuck(LeggedRobot):
         features = self._gait_phase_observation()
         stand = self.skill_mode == self.SKILL_STAND
         squat = self.skill_mode == self.SKILL_SQUAT
+        recovery = self.skill_mode == self.SKILL_RECOVERY
         features[stand, 0] = 1.0
         features[stand, 1] = 0.0
         if torch.any(squat):
@@ -226,6 +232,8 @@ class MiniDuck(LeggedRobot):
             )
             features[squat, 0] = 1.0 - 2.0 * depth
             features[squat, 1] = 1.0
+        features[recovery, 0] = -1.0
+        features[recovery, 1] = -1.0
         return features
 
     def _schedule_skill_height(self, env_ids, goal_height):
@@ -313,6 +321,28 @@ class MiniDuck(LeggedRobot):
         )
         self.commands[moving, 2] = torch.clamp(
             correction[moving],
+            -cfg.heading_hold_max_yaw_rate,
+            cfg.heading_hold_max_yaw_rate,
+        )
+
+    def _apply_diagonal_heading_hold(self):
+        if not self._stage_is("diagonal_motion"):
+            return
+        active = (
+            (torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x"))
+            & (torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y"))
+        )
+        if not torch.any(active):
+            return
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        cfg = self.cfg.skill_curriculum
+        correction = (
+            -cfg.heading_hold_kp * heading_error
+            - cfg.heading_hold_kd * self.base_ang_vel[:, 2]
+        )
+        self.commands[active, 2] = torch.clamp(
+            correction[active],
             -cfg.heading_hold_max_yaw_rate,
             cfg.heading_hold_max_yaw_rate,
         )
@@ -433,6 +463,8 @@ class MiniDuck(LeggedRobot):
         self.skill_goal_height[env_ids] = nominal_height
         self.skill_transition_step[env_ids] = 0
         self.squat_target_low[env_ids] = False
+        self.recovery_elapsed_steps[env_ids] = 0
+        self.recovery_upright_steps[env_ids] = 0
         self._randomize_dynamic_properties(env_ids)
 
         self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
@@ -867,16 +899,26 @@ class MiniDuck(LeggedRobot):
             self.line_reference_active[env_ids] = True
             if torch.any(moving_mask):
                 moving_ids = env_ids[moving_mask]
-                self._sample_sagittal_command(moving_ids, allow_turn=False)
                 backward = torch.rand(len(moving_ids), device=self.device) < (
                     self.cfg.skill_curriculum.action_switch_backward_prob
                 )
-                magnitudes = torch.abs(self.commands[moving_ids, 0])
-                negative_max = abs(self.command_ranges["lin_vel_x"][0])
+                speed_cfg = self.cfg.skill_curriculum
+                forward_speed = torch_rand_float(
+                    speed_cfg.action_switch_forward_speed_range[0],
+                    speed_cfg.action_switch_forward_speed_range[1],
+                    (len(moving_ids), 1),
+                    device=self.device,
+                ).squeeze(1)
+                backward_speed = torch_rand_float(
+                    speed_cfg.action_switch_backward_speed_range[0],
+                    speed_cfg.action_switch_backward_speed_range[1],
+                    (len(moving_ids), 1),
+                    device=self.device,
+                ).squeeze(1)
                 self.commands[moving_ids, 0] = torch.where(
                     backward,
-                    -torch.clamp(magnitudes, max=negative_max),
-                    magnitudes,
+                    backward_speed,
+                    forward_speed,
                 )
             goals = torch.full(
                 (len(env_ids),),
@@ -888,6 +930,53 @@ class MiniDuck(LeggedRobot):
             )
             self._schedule_skill_height(env_ids, goals)
             self.emergency_probe_active[env_ids] = False
+            return
+
+        if action_stage is not None and action_stage.key == "fall_recovery":
+            self.commands[env_ids, :3] = 0.0
+            self.skill_mode[env_ids] = self.SKILL_RECOVERY
+            self.line_reference_active[env_ids] = False
+            self._schedule_skill_height(
+                env_ids, self.cfg.skill_curriculum.nominal_body_height_m
+            )
+            return
+
+        if action_stage is not None and action_stage.key == "diagonal_motion":
+            cfg = self.cfg.skill_curriculum
+            count = len(env_ids)
+            x_magnitude = torch_rand_float(
+                cfg.diagonal_forward_speed_range[0],
+                cfg.diagonal_forward_speed_range[1],
+                (count, 1),
+                device=self.device,
+            ).squeeze(1)
+            y_magnitude = torch_rand_float(
+                cfg.diagonal_lateral_speed_range[0],
+                cfg.diagonal_lateral_speed_range[1],
+                (count, 1),
+                device=self.device,
+            ).squeeze(1)
+            x_sign = torch.where(
+                torch.rand(count, device=self.device) < 0.5,
+                -torch.ones(count, device=self.device),
+                torch.ones(count, device=self.device),
+            )
+            y_sign = torch.where(
+                torch.rand(count, device=self.device) < 0.5,
+                -torch.ones(count, device=self.device),
+                torch.ones(count, device=self.device),
+            )
+            self.commands[env_ids, 0] = x_magnitude * x_sign
+            self.commands[env_ids, 1] = y_magnitude * y_sign
+            self.commands[env_ids, 2] = 0.0
+            self.skill_mode[env_ids] = self.SKILL_LOCOMOTION
+            self.line_reference_active[env_ids] = True
+            _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+            self.command_heading[env_ids] = yaw
+            self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+            self._schedule_skill_height(
+                env_ids, self.cfg.skill_curriculum.nominal_body_height_m
+            )
             return
 
         self.commands[env_ids, :3] = 0.0
@@ -1068,6 +1157,46 @@ class MiniDuck(LeggedRobot):
             -ang_vel_range, ang_vel_range, (len(env_ids), 3), device=self.device
         )
 
+        if self._stage_is("fall_recovery"):
+            cfg = self.cfg.skill_curriculum
+            count = len(env_ids)
+            progress = self._ramp_progress(
+                self.common_step_counter,
+                cfg.recovery_curriculum_start_step,
+                cfg.recovery_curriculum_ramp_steps,
+            )
+            pitch_low = cfg.recovery_pitch_start_range_rad[0] + progress * (
+                cfg.recovery_pitch_range_rad[0]
+                - cfg.recovery_pitch_start_range_rad[0]
+            )
+            pitch_high = cfg.recovery_pitch_start_range_rad[1] + progress * (
+                cfg.recovery_pitch_range_rad[1]
+                - cfg.recovery_pitch_start_range_rad[1]
+            )
+            magnitude = torch_rand_float(
+                pitch_low,
+                pitch_high,
+                (count, 1),
+                device=self.device,
+            ).squeeze(1)
+            direction = torch.where(
+                torch.rand(count, device=self.device) < cfg.recovery_supine_prob,
+                torch.ones(count, device=self.device),
+                -torch.ones(count, device=self.device),
+            )
+            pitch = magnitude * direction
+            roll = torch_rand_float(
+                -0.08, 0.08, (count, 1), device=self.device
+            ).squeeze(1)
+            yaw = torch_rand_float(
+                -0.20, 0.20, (count, 1), device=self.device
+            ).squeeze(1)
+            self.root_states[env_ids, 2] = (
+                self.env_origins[env_ids, 2] + cfg.recovery_start_height_m
+            )
+            self.root_states[env_ids, 3:7] = quat_from_euler_xyz(roll, pitch, yaw)
+            self.root_states[env_ids, 7:13] = 0.0
+
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
@@ -1172,6 +1301,17 @@ class MiniDuck(LeggedRobot):
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
     def check_termination(self):
+        if self._stage_is("fall_recovery"):
+            cfg = self.cfg.skill_curriculum
+            timeout_steps = max(1, round(cfg.recovery_timeout_s / self.dt))
+            success_steps = max(1, round(cfg.recovery_success_hold_s / self.dt))
+            recovered = self.recovery_upright_steps >= success_steps
+            timed_out = self.recovery_elapsed_steps >= timeout_steps
+            self.reset_buf = recovered | timed_out
+            # Successful recoveries are completed tasks, not failures, so they
+            # must not receive the standard termination penalty.
+            self.time_out_buf = recovered.clone()
+            return
         target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
         gravity_alignment = torch.sum(
             self.projected_gravity * target_gravity,
@@ -1500,11 +1640,34 @@ class MiniDuck(LeggedRobot):
         self._update_command_range_schedule()
         self._update_skill_targets()
         self._apply_straight_heading_hold()
+        self._apply_diagonal_heading_hold()
+        self._update_recovery_state()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._update_gait_reference_state()
         push_max_vel = self._current_push_max_vel()
         if push_max_vel > 0.0 and self.common_step_counter % int(self.cfg.domain_rand.push_interval) == 0:
             self._push_robots()
+
+    def _recovery_upright_mask(self):
+        cfg = self.cfg.skill_curriculum
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target, dim=1)
+        return (
+            (alignment > np.cos(np.deg2rad(cfg.recovery_upright_tilt_deg)))
+            & (self.root_states[:, 2] > cfg.recovery_upright_height_m)
+            & (torch.norm(self.base_ang_vel, dim=1) < 1.0)
+        )
+
+    def _update_recovery_state(self):
+        if not self._stage_is("fall_recovery"):
+            return
+        self.recovery_elapsed_steps += 1
+        upright = self._recovery_upright_mask()
+        self.recovery_upright_steps = torch.where(
+            upright,
+            self.recovery_upright_steps + 1,
+            torch.zeros_like(self.recovery_upright_steps),
+        )
 
     def _push_robots(self):
         max_vel = self._current_push_max_vel()
@@ -1637,6 +1800,90 @@ class MiniDuck(LeggedRobot):
             return torch.zeros(self.num_envs, device=self.device)
         contacts = torch.sum(self.gait_contacts.float(), dim=1) == 2
         return contacts.float() * self._stationary_skill_mask()
+
+    def _reward_recovery_alignment(self):
+        if not self._stage_is("fall_recovery"):
+            return torch.zeros(self.num_envs, device=self.device)
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target, dim=1)
+        return torch.clamp((alignment + 1.0) * 0.5, min=0.0, max=1.0)
+
+    def _reward_recovery_height(self):
+        if not self._stage_is("fall_recovery"):
+            return torch.zeros(self.num_envs, device=self.device)
+        target = self.cfg.skill_curriculum.nominal_body_height_m
+        error = torch.square((self.root_states[:, 2] - target) / 0.04)
+        return torch.exp(-error)
+
+    def _reward_recovery_success(self):
+        if not self._stage_is("fall_recovery"):
+            return torch.zeros(self.num_envs, device=self.device)
+        return self._recovery_upright_mask().float()
+
+    def _reward_recovery_stability(self):
+        if not self._stage_is("fall_recovery"):
+            return torch.zeros(self.num_envs, device=self.device)
+        motion = torch.sum(torch.square(self.base_lin_vel), dim=1)
+        motion += 0.20 * torch.sum(torch.square(self.base_ang_vel), dim=1)
+        return motion * self._recovery_upright_mask().float()
+
+    def _diagonal_command_mask(self):
+        return (
+            (torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x"))
+            & (torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y"))
+        ).float()
+
+    def _reward_diagonal_velocity_tracking(self):
+        if not self._stage_is("diagonal_motion"):
+            return torch.zeros(self.num_envs, device=self.device)
+        error = torch.sum(
+            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
+        )
+        return torch.exp(-error / 0.0025) * self._diagonal_command_mask()
+
+    def _reward_diagonal_progress(self):
+        if not self._stage_is("diagonal_motion"):
+            return torch.zeros(self.num_envs, device=self.device)
+        command = self.commands[:, :2]
+        command_norm = torch.clamp(torch.norm(command, dim=1), min=1.0e-4)
+        directed_speed = torch.sum(command * self.base_lin_vel[:, :2], dim=1)
+        directed_speed /= command_norm
+        ratio = directed_speed / command_norm
+        return torch.clamp(ratio, min=0.0, max=1.0) * self._diagonal_command_mask()
+
+    def _reward_diagonal_heading_error(self):
+        if not self._stage_is("diagonal_motion"):
+            return torch.zeros(self.num_envs, device=self.device)
+        _, _, yaw = euler_from_quat(self.base_quat)
+        error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        return (
+            torch.clamp(torch.square(error / 0.20), max=4.0)
+            * self._diagonal_command_mask()
+        )
+
+    def _reward_diagonal_path_error(self):
+        if not self._stage_is("diagonal_motion"):
+            return torch.zeros(self.num_envs, device=self.device)
+        command = self.commands[:, :2]
+        command_norm = torch.clamp(torch.norm(command, dim=1), min=1.0e-4)
+        cos_heading = torch.cos(self.command_heading)
+        sin_heading = torch.sin(self.command_heading)
+        world_direction = torch.stack(
+            (
+                cos_heading * command[:, 0] - sin_heading * command[:, 1],
+                sin_heading * command[:, 0] + cos_heading * command[:, 1],
+            ),
+            dim=1,
+        ) / command_norm.unsqueeze(1)
+        perpendicular = torch.stack(
+            (-world_direction[:, 1], world_direction[:, 0]), dim=1
+        )
+        delta = self.root_states[:, :2] - self.command_start_xy
+        cross_track = torch.sum(delta * perpendicular, dim=1)
+        return (
+            torch.clamp(torch.square(cross_track / 0.10), max=9.0)
+            * self._diagonal_command_mask()
+        )
 
     def _reward_alive(self):
         return torch.ones(self.num_envs, device=self.device)

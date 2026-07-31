@@ -29,6 +29,9 @@ def _evaluation_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--protocol", choices=("squat", "action_switch"), required=True)
     parser.add_argument("--segment_s", type=float, default=2.0)
+    parser.add_argument("--stationary_s", type=float, default=2.0)
+    parser.add_argument("--forward_speed", type=float, default=0.08)
+    parser.add_argument("--backward_speed", type=float, default=-0.06)
     parser.add_argument("--output_dir", default="evaluation/skill_stages")
     parser.add_argument("--run_label", default=None)
     parser.add_argument("--randomized", action="store_true")
@@ -39,6 +42,8 @@ def _evaluation_args():
     parser.add_argument("--heading_hold_kd", type=float, default=None)
     parser.add_argument("--heading_hold_max", type=float, default=None)
     parser.add_argument("--line_hold_max", type=float, default=None)
+    parser.add_argument("--locomotion_checkpoint_path", default=None)
+    parser.add_argument("--locomotion_blend", type=float, default=0.0)
     known, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return known
@@ -59,7 +64,7 @@ def _checkpoint_path(train_cfg, args):
     return get_load_path(root, load_run=train_cfg.runner.load_run, checkpoint=checkpoint)
 
 
-def _protocol(name, segment_s):
+def _protocol(name, segment_s, forward_speed, backward_speed, stationary_s):
     if name == "squat":
         return (
             ("stand_1", 0, 0.0, "nominal", segment_s),
@@ -69,13 +74,13 @@ def _protocol(name, segment_s):
             ("stand_3", 0, 0.0, "nominal", segment_s),
         )
     return (
-        ("stand_1", 0, 0.0, "nominal", segment_s),
-        ("forward", 1, 0.08, "nominal", segment_s),
-        ("stop_1", 0, 0.0, "nominal", segment_s),
-        ("squat", 2, 0.0, "squat", segment_s),
-        ("stand_2", 0, 0.0, "nominal", segment_s),
-        ("backward", 1, -0.06, "nominal", segment_s),
-        ("stop_2", 0, 0.0, "nominal", segment_s),
+        ("stand_1", 0, 0.0, "nominal", stationary_s),
+        ("forward", 1, forward_speed, "nominal", segment_s),
+        ("stop_1", 0, 0.0, "nominal", stationary_s),
+        ("squat", 2, 0.0, "squat", stationary_s),
+        ("stand_2", 0, 0.0, "nominal", stationary_s),
+        ("backward", 1, backward_speed, "nominal", segment_s),
+        ("stop_2", 0, 0.0, "nominal", stationary_s),
     )
 
 
@@ -112,6 +117,8 @@ def _plot(path, rows, result, boundaries):
 def evaluate(args, cfg):
     if not 0.0 <= cfg.symmetry_blend <= 1.0:
         raise ValueError("symmetry_blend must be between 0 and 1")
+    if not 0.0 <= cfg.locomotion_blend <= 1.0:
+        raise ValueError("locomotion_blend must be between 0 and 1")
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     env_cfg.env.num_envs = args.num_envs or 128
     env_cfg.terrain.num_rows = 1
@@ -159,8 +166,29 @@ def evaluate(args, cfg):
     iteration = _load_policy_checkpoint(runner, checkpoint, env.device)
     env.common_step_counter = iteration * runner.num_steps_per_env
     policy = runner.get_inference_policy(device=env.device)
+    locomotion_policy = None
+    if cfg.locomotion_checkpoint_path:
+        locomotion_runner, _ = task_registry.make_alg_runner(
+            env=env,
+            name=args.task,
+            args=args,
+            train_cfg=train_cfg,
+            log_root=None,
+        )
+        _load_policy_checkpoint(
+            locomotion_runner,
+            cfg.locomotion_checkpoint_path,
+            env.device,
+        )
+        locomotion_policy = locomotion_runner.get_inference_policy(device=env.device)
 
-    phases = _protocol(cfg.protocol, cfg.segment_s)
+    phases = _protocol(
+        cfg.protocol,
+        cfg.segment_s,
+        cfg.forward_speed,
+        cfg.backward_speed,
+        cfg.stationary_s,
+    )
     phase_steps = [max(1, round(item[4] / env.dt)) for item in phases]
     total_steps = sum(phase_steps)
     nominal = env.cfg.skill_curriculum.nominal_body_height_m
@@ -188,7 +216,11 @@ def evaluate(args, cfg):
         name: torch.zeros(count, env.num_actions, device=env.device)
         for name, *_ in phases
     }
+    phase_displacement = {
+        name: torch.zeros(count, device=env.device) for name, *_ in phases
+    }
     rows = []
+    phase_start_xy = start_xy.clone()
     obs = env.get_observations()
     phase_index = 0
     applied_phase_index = -1
@@ -206,6 +238,7 @@ def evaluate(args, cfg):
         env.commands[:, 0] = vx
         env.skill_mode[:] = mode
         if phase_index != applied_phase_index:
+            phase_start_xy = env.root_states[:, :2].clone()
             env._schedule_skill_height(
                 torch.arange(env.num_envs, device=env.device), target_height
             )
@@ -229,6 +262,9 @@ def evaluate(args, cfg):
                 )
             else:
                 actions = direct_actions
+            if locomotion_policy is not None and mode == env.SKILL_LOCOMOTION:
+                expert_actions = locomotion_policy(obs.detach())
+                actions = torch.lerp(actions, expert_actions, cfg.locomotion_blend)
         obs, _, _, dones, _ = env.step(actions.detach())
         fallen |= dones.bool()
         active = ~fallen
@@ -246,6 +282,15 @@ def evaluate(args, cfg):
         action_rms = torch.sqrt(torch.mean(torch.square(actions), dim=1))
         action_rate = torch.sqrt(torch.mean(torch.square(actions - previous_action), dim=1))
         previous_action = actions
+        phase_delta = env.root_states[:, :2] - phase_start_xy
+        phase_forward = (
+            phase_delta[:, 0] * torch.cos(start_yaw)
+            + phase_delta[:, 1] * torch.sin(start_yaw)
+        )
+        if vx != 0.0:
+            phase_displacement[name] = torch.sign(
+                torch.tensor(vx, device=env.device)
+            ) * phase_forward
 
         # The last 0.5 s of each segment measures achieved behavior, not transient response.
         window_start = phase_steps[phase_index] - max(1, round(0.5 / env.dt))
@@ -320,9 +365,17 @@ def evaluate(args, cfg):
         "checkpoint_iteration": iteration,
         "num_trials": count,
         "segment_s": cfg.segment_s,
+        "stationary_s": cfg.stationary_s,
+        "forward_command_mps": cfg.forward_speed,
+        "backward_command_mps": cfg.backward_speed,
         "randomized": cfg.randomized,
         "symmetric_inference": cfg.symmetric_inference,
         "symmetry_blend": 1.0 if cfg.symmetric_inference else cfg.symmetry_blend,
+        "locomotion_checkpoint": (
+            os.path.abspath(cfg.locomotion_checkpoint_path)
+            if cfg.locomotion_checkpoint_path else None
+        ),
+        "locomotion_blend": cfg.locomotion_blend,
         "fall_rate": float(fallen.float().mean().item()),
         "mean_squat_depth_m": float((nominal - squat_height).mean().item()),
         "p95_stand_height_error_m": _percentile(stand_height_error),
@@ -348,8 +401,13 @@ def evaluate(args, cfg):
         },
         "phase_terminal_metrics": {
             name: {
-                key: float(torch.mean(value / max(phase_counts[name], 1)).item())
-                for key, value in phase_sums[name].items()
+                **{
+                    key: float(torch.mean(value / max(phase_counts[name], 1)).item())
+                    for key, value in phase_sums[name].items()
+                },
+                "mean_directed_displacement_m": float(
+                    torch.mean(phase_displacement[name]).item()
+                ),
             }
             for name, *_ in phases
         },

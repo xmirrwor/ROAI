@@ -138,6 +138,7 @@ def build_metadata(checkpoint_path, output_onnx):
             "locomotion": "[cos(gait_phase), sin(gait_phase)]",
             "stand": [1.0, 0.0],
             "squat": "[1 - 2 * normalized_depth, 1]",
+            "recovery": [-1.0, -1.0],
         },
         "symmetric_inference": False,
     }
