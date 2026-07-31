@@ -89,7 +89,7 @@ FULL_SEQUENCE = (
     ("forward_right", (0.10, -0.08, 0.0), 4.0, 1, "nominal", "stage7", None, "diagonal_motion"),
     ("backward_left", (-0.08, 0.08, 0.0), 4.0, 1, "nominal", "stage7", None, "diagonal_motion"),
     ("backward_right", (-0.08, -0.08, 0.0), 4.0, 1, "nominal", "stage7", None, "diagonal_motion"),
-    ("prepare_obstacle", (0.0, 0.0, 0.0), 1.0, 4, "nominal", "stage8", "obstacle_reset", "obstacle_crossing"),
+    ("prepare_obstacle", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "obstacle_reset", "action_switch"),
     ("obstacle_crossing", (0.12, 0.0, 0.0), 7.0, 4, "nominal", "stage8", None, "obstacle_crossing"),
     ("finish_stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal", "stage5", "flat_reset", "action_switch"),
 )
@@ -236,7 +236,7 @@ def _set_demo_pose(env, event):
                 env.obstacle_world_x
                 - env.cfg.skill_curriculum.obstacle_approach_distance_m
             )
-            env.obstacle_task_active[:] = True
+            env.obstacle_task_active[:] = False
             env.obstacle_elapsed_steps[:] = 0
         else:
             env.obstacle_task_active[:] = False
@@ -247,6 +247,10 @@ def _set_demo_pose(env, event):
     env.commanded_action_history_2[:] = 0.0
     env.actions[:] = 0.0
     env.previous_motor_targets[:] = env.default_dof_pos
+    env.gait_phase_steps[:] = 0
+    env.gait_contacts[:] = False
+    env.gait_last_contacts[:] = False
+    env.gait_first_contacts[:] = 0.0
     env_ids_int32 = env_ids.to(dtype=torch.int32)
     env.gym.set_actor_root_state_tensor_indexed(
         env.sim,
