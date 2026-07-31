@@ -68,6 +68,27 @@ class InterfaceTests(unittest.TestCase):
         self.assertAlmostEqual(float(obs[-2]), -1.0)
         self.assertAlmostEqual(float(obs[-1]), -1.0)
 
+    def test_obstacle_command_preserves_phase_and_encodes_distance(self):
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        builder = ObservationBuilder(self.cfg)
+        obs = builder.build(
+            state,
+            Command(
+                vx=0.12,
+                skill=SkillMode.OBSTACLE,
+                obstacle_distance_m=0.10,
+                obstacle_height_m=0.015,
+            ),
+        )
+        self.assertEqual(obs.shape, (64,))
+        self.assertAlmostEqual(float(obs[10]), 0.125)
+        self.assertAlmostEqual(float(obs[-2]), 1.0)
+        self.assertAlmostEqual(float(obs[-1]), 0.0)
+
     def test_straight_command_uses_gyro_heading_hold(self):
         state = RobotState(
             0.0,

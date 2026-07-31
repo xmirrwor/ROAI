@@ -58,7 +58,9 @@ class Terrain:
         self.tot_rows = int(cfg.num_rows * self.length_per_env_pixels) + 2 * self.border
 
         self.height_field_raw = np.zeros((self.tot_rows , self.tot_cols), dtype=np.int16)
-        if cfg.curriculum:
+        if getattr(cfg, "obstacle_course", False):
+            self.obstacle_course()
+        elif cfg.curriculum:
             self.curiculum()
         elif cfg.selected:
             self.selected_terrain()
@@ -71,6 +73,59 @@ class Terrain:
                                                                                             self.cfg.horizontal_scale,
                                                                                             self.cfg.vertical_scale,
                                                                                             self.cfg.slope_treshold)
+        # Isaac Gym's heightfield binding requires a flat array. The base
+        # environment reshapes this back to (rows, cols) for observations.
+        self.heightsamples = self.height_field_raw.reshape(-1)
+
+    def obstacle_course(self):
+        """Build one low transverse ridge per tile for the MiniDuck curriculum."""
+        height_min, height_max = self.cfg.obstacle_height_range
+        heights = np.linspace(height_min, height_max, self.cfg.num_cols)
+        self.obstacle_heights = np.zeros(
+            (self.cfg.num_rows, self.cfg.num_cols), dtype=np.float32
+        )
+        self.obstacle_offsets = np.full_like(
+            self.obstacle_heights, self.cfg.obstacle_offset_m
+        )
+        for row in range(self.cfg.num_rows):
+            for col in range(self.cfg.num_cols):
+                terrain = terrain_utils.SubTerrain(
+                    "obstacle_course",
+                    # SubTerrain stores width on axis 0 while Terrain maps
+                    # world x to axis 0, so the names are intentionally swapped.
+                    width=self.length_per_env_pixels,
+                    length=self.width_per_env_pixels,
+                    vertical_scale=self.cfg.vertical_scale,
+                    horizontal_scale=self.cfg.horizontal_scale,
+                )
+                height = float(heights[col])
+                center_x = terrain.height_field_raw.shape[0] // 2 + round(
+                    self.cfg.obstacle_offset_m / self.cfg.horizontal_scale
+                )
+                center_y = terrain.height_field_raw.shape[1] // 2
+                half_depth = max(
+                    1,
+                    round(
+                        self.cfg.obstacle_depth_m
+                        / self.cfg.horizontal_scale
+                        / 2.0
+                    ),
+                )
+                half_width = max(
+                    1,
+                    round(
+                        self.cfg.obstacle_width_m
+                        / self.cfg.horizontal_scale
+                        / 2.0
+                    ),
+                )
+                raw_height = max(1, round(height / self.cfg.vertical_scale))
+                terrain.height_field_raw[
+                    center_x - half_depth:center_x + half_depth + 1,
+                    center_y - half_width:center_y + half_width + 1,
+                ] = raw_height
+                self.obstacle_heights[row, col] = raw_height * self.cfg.vertical_scale
+                self.add_terrain_to_map(terrain, row, col)
     
     def randomized_terrain(self):
         for k in range(self.cfg.num_sub_terrains):

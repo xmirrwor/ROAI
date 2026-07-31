@@ -53,8 +53,8 @@ ACTION_STAGES = (
         5,
         "obstacle_crossing",
         "Cross height-varied obstacles without body collision or foot trapping.",
-        False,
-        ("obstacle_terrain", "height_observation", "clearance_reward"),
+        True,
+        ("obstacle_terrain", "distance_observation", "clearance_reward"),
     ),
     ActionStage(
         6,

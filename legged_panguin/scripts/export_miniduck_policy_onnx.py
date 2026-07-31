@@ -139,6 +139,12 @@ def build_metadata(checkpoint_path, output_onnx):
             "stand": [1.0, 0.0],
             "squat": "[1 - 2 * normalized_depth, 1]",
             "recovery": [-1.0, -1.0],
+            "obstacle": "[cos(gait_phase), sin(gait_phase)]",
+        },
+        "obstacle_distance_encoding": {
+            "observation_index": 10,
+            "value": "clip(obstacle_distance_m / 0.80, -1, 1)",
+            "scope": "obstacle skill only; replaces the unused lateral command feature",
         },
         "symmetric_inference": False,
     }

@@ -69,15 +69,22 @@ class ObservationBuilder:
         skill = command.skill
         if skill == SkillMode.AUTO:
             skill = SkillMode.STAND if stationary else SkillMode.LOCOMOTION
-        if skill != SkillMode.LOCOMOTION:
+        if skill not in (SkillMode.LOCOMOTION, SkillMode.OBSTACLE):
             # Training pins zero-command emergency stops to the nominal stand
             # phase; deployment must build the same observation.
             self.step_index = 0
         command_scale = np.asarray(scales["command"], dtype=np.float32)
         q_error = np.asarray(state.joints.position) - np.asarray(self.config.default_actuator)
         angle = 2.0 * math.pi * self.step_index / self.config.gait_phase_period_steps
+        command_features = np.asarray(
+            [command.vx, command.vy, effective_yaw_rate]
+        ) * command_scale
         if skill == SkillMode.RECOVERY:
             skill_features = np.asarray([-1.0, -1.0])
+        elif skill == SkillMode.OBSTACLE:
+            distance = 0.0 if command.obstacle_distance_m is None else float(command.obstacle_distance_m)
+            command_features[1] = np.clip(distance / 0.80, -1.0, 1.0)
+            skill_features = np.asarray([math.cos(angle), math.sin(angle)])
         elif skill == SkillMode.SQUAT:
             target_height = (
                 self.config.squat_body_height_m
@@ -102,7 +109,7 @@ class ObservationBuilder:
             np.asarray(state.imu.gyro) * float(scales["ang_vel"]),
             np.asarray(state.imu.gravity) * float(scales["gravity"]),
             np.asarray(state.imu.acceleration) * float(scales["accel"]),
-            np.asarray([command.vx, command.vy, effective_yaw_rate]) * command_scale,
+            command_features,
             q_error * float(scales["dof_pos"]),
             np.asarray(state.joints.velocity) * float(scales["dof_vel"]),
             *self.action_history,

@@ -1,0 +1,34 @@
+{
+  "run_label": "stage8_screen_12370",
+  "protocol_name": "obstacle_crossing",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Jul31_19-27-28_stage8_obstacle_distancephase_512_continue/model_12370.pt",
+  "checkpoint_iteration": 12370,
+  "num_trials": 32,
+  "duration_s": 7.0,
+  "randomized": false,
+  "success_rate": 0.8125,
+  "fall_rate": 0.0,
+  "body_collision_rate": 0.0,
+  "mean_max_progress_m": 0.6727616786956787,
+  "mean_max_foot_clearance_m": 0.054690539836883545,
+  "mean_success_time_s": 4.010769367218018,
+  "initial_diagnostics": {
+    "mean_base_height_m": 0.14562909305095673,
+    "mean_origin_height_m": 0.0,
+    "mean_gravity_alignment": 0.9998944997787476,
+    "mean_obstacle_feature_0": 1.0,
+    "mean_obstacle_feature_1": 0.0,
+    "max_abs_initial_action": 1.0235021114349365
+  },
+  "acceptance": {
+    "success_rate_at_least_25pct": true,
+    "fall_rate_at_most_50pct": true,
+    "mean_progress_at_least_0p30m": true
+  },
+  "acceptance_passed": true,
+  "provenance": {
+    "aggregation": "raw per-step means and per-trial outcomes; no smoothing",
+    "failed_trials": "retained",
+    "obstacle": "fixed transverse ridge; four deterministic height groups"
+  }
+}

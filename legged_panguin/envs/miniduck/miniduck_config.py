@@ -41,9 +41,22 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         num_actions = 10
 
     class terrain(LeggedRobotCfg.terrain):
-        mesh_type = 'plane'
+        obstacle_course = os.environ.get("MINIDUCK_FORCED_STAGE") == "5"
+        mesh_type = 'heightfield' if obstacle_course else 'plane'
         measure_heights = False
         curriculum = False
+        horizontal_scale = 0.02
+        vertical_scale = 0.002
+        border_size = 1.0
+        terrain_length = 6.0
+        terrain_width = 2.0
+        num_rows = 1
+        num_cols = 4
+        max_init_terrain_level = 0
+        obstacle_offset_m = 2.0
+        obstacle_height_range = [0.012, 0.024]
+        obstacle_depth_m = 0.06
+        obstacle_width_m = 0.70
 
     class init_state(LeggedRobotCfg.init_state):
         # PhysX evolutionary search result, cross-validated in MuJoCo:
@@ -169,6 +182,13 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "diagonal_progress",
             "diagonal_heading_error",
             "diagonal_path_error",
+            "obstacle_progress",
+            "obstacle_clearance",
+            "obstacle_success",
+            "obstacle_heading_error",
+            "obstacle_lateral_error",
+            "obstacle_body_collision",
+            "obstacle_stability",
             "yaw_twist_without_step",
         ]
 
@@ -243,6 +263,13 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             diagonal_progress = 8.0
             diagonal_heading_error = -3.0
             diagonal_path_error = -6.0
+            obstacle_progress = 18.0
+            obstacle_clearance = 8.0
+            obstacle_success = 60.0
+            obstacle_heading_error = -4.0
+            obstacle_lateral_error = -6.0
+            obstacle_body_collision = -15.0
+            obstacle_stability = 4.0
             lateral_axis_isolation = -0.55
             lateral_yaw_rate = -1.6
             lateral_heading_error = -2.2
@@ -334,8 +361,8 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             72_000,  # obstacle crossing
             72_000,  # ball kick
         ]
-        # Stages 0-4 have dedicated observations, samplers and evaluations.
-        max_implemented_stage = 4
+        # Stages 0-5 have dedicated observations, samplers and evaluations.
+        max_implemented_stage = 5
         emergency_motion_probe_prob = 0.75
         emergency_settle_linear_mps = 0.035
         emergency_settle_angular_rps = 0.25
@@ -371,6 +398,18 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         recovery_upright_height_m = 0.125
         diagonal_forward_speed_range = [0.08, 0.12]
         diagonal_lateral_speed_range = [0.06, 0.10]
+        obstacle_offset_m = 2.0
+        obstacle_approach_distance_m = 0.45
+        obstacle_spawn_height_offset_m = 0.03
+        obstacle_speed_range = [0.10, 0.14]
+        obstacle_timeout_s = 7.0
+        obstacle_success_margin_m = 0.14
+        obstacle_near_distance_m = 0.18
+        obstacle_observation_start_m = 0.30
+        obstacle_observation_full_m = 0.18
+        obstacle_clearance_margin_m = 0.006
+        obstacle_lateral_tolerance_m = 0.15
+        obstacle_heading_tolerance_deg = 22.0
 
     class domain_rand(LeggedRobotCfg.domain_rand):
         friction_range = [0.65, 1.10]

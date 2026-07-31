@@ -25,6 +25,7 @@ class MiniDuck(LeggedRobot):
     SKILL_LOCOMOTION = 1
     SKILL_SQUAT = 2
     SKILL_RECOVERY = 3
+    SKILL_OBSTACLE = 4
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -64,6 +65,49 @@ class MiniDuck(LeggedRobot):
             self.num_envs, dtype=torch.long, device=self.device
         )
         self.recovery_upright_steps = torch.zeros_like(self.recovery_elapsed_steps)
+        obstacle_enabled = self._stage_is("obstacle_crossing")
+        self.obstacle_task_active = torch.full(
+            (self.num_envs,), obstacle_enabled, dtype=torch.bool, device=self.device
+        )
+        self.demo_action_stage_key = None
+        self.demo_recovery_active = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.obstacle_elapsed_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.obstacle_success_latched = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.obstacle_progress_latched = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        obstacle_cfg = self.cfg.skill_curriculum
+        self.obstacle_world_x = (
+            self.env_origins[:, 0] + obstacle_cfg.obstacle_offset_m
+        )
+        if hasattr(self, "terrain") and hasattr(self.terrain, "obstacle_heights"):
+            height_grid = torch.as_tensor(
+                self.terrain.obstacle_heights,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            self.obstacle_heights = height_grid[
+                self.terrain_levels, self.terrain_types
+            ]
+        else:
+            self.obstacle_heights = torch.full(
+                (self.num_envs,),
+                float(self.cfg.terrain.obstacle_height_range[0]),
+                device=self.device,
+            )
+        body_mask = torch.ones(
+            self.contact_forces.shape[1], dtype=torch.bool, device=self.device
+        )
+        body_mask[self.feet_indices] = False
+        self.obstacle_body_indices = torch.arange(
+            self.contact_forces.shape[1], device=self.device
+        )[body_mask]
 
         max_action_delay = self.cfg.domain_rand.max_action_delay
         self.action_delay_buffer = torch.zeros(
@@ -236,6 +280,17 @@ class MiniDuck(LeggedRobot):
         features[recovery, 1] = -1.0
         return features
 
+    def _command_observation(self):
+        features = self.commands[:, :3] * self.commands_scale
+        obstacle = (
+            (self.skill_mode == self.SKILL_OBSTACLE)
+            & self.obstacle_task_active
+        )
+        if torch.any(obstacle):
+            distance = self.obstacle_world_x[obstacle] - self.root_states[obstacle, 0]
+            features[obstacle, 1] = torch.clamp(distance / 0.80, -1.0, 1.0)
+        return features
+
     def _schedule_skill_height(self, env_ids, goal_height):
         if len(env_ids) == 0:
             return
@@ -379,7 +434,11 @@ class MiniDuck(LeggedRobot):
                 & (torch.abs(self.commands[:, 1]) < 0.02)
                 & (torch.abs(self.commands[:, 2]) < 0.1)
             )
-            freeze_phase = stationary_command | (self.skill_mode != self.SKILL_LOCOMOTION)
+            locomotion_skill = (
+                (self.skill_mode == self.SKILL_LOCOMOTION)
+                | (self.skill_mode == self.SKILL_OBSTACLE)
+            )
+            freeze_phase = stationary_command | ~locomotion_skill
             self.gait_phase_steps = torch.where(
                 freeze_phase,
                 torch.zeros_like(next_phase),
@@ -465,6 +524,8 @@ class MiniDuck(LeggedRobot):
         self.squat_target_low[env_ids] = False
         self.recovery_elapsed_steps[env_ids] = 0
         self.recovery_upright_steps[env_ids] = 0
+        self.obstacle_elapsed_steps[env_ids] = 0
+        self.obstacle_task_active[env_ids] = self._stage_is("obstacle_crossing")
         self._randomize_dynamic_properties(env_ids)
 
         self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
@@ -798,6 +859,8 @@ class MiniDuck(LeggedRobot):
             return 0.0
         if action_stage is not None and action_stage.key == "action_switch":
             return min(0.02, cfg.advanced_max_push_vel_xy)
+        if action_stage is not None and action_stage.key == "obstacle_crossing":
+            return 0.0
         if not cfg.curriculum_push_robots:
             return cfg.max_push_vel_xy if cfg.push_robots else 0.0
         progress = self._ramp_progress(
@@ -970,6 +1033,28 @@ class MiniDuck(LeggedRobot):
             self.commands[env_ids, 1] = y_magnitude * y_sign
             self.commands[env_ids, 2] = 0.0
             self.skill_mode[env_ids] = self.SKILL_LOCOMOTION
+            self.line_reference_active[env_ids] = True
+            _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+            self.command_heading[env_ids] = yaw
+            self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+            self._schedule_skill_height(
+                env_ids, self.cfg.skill_curriculum.nominal_body_height_m
+            )
+            return
+
+        if action_stage is not None and action_stage.key == "obstacle_crossing":
+            cfg = self.cfg.skill_curriculum
+            count = len(env_ids)
+            self.commands[env_ids, :3] = 0.0
+            self.commands[env_ids, 0] = torch_rand_float(
+                cfg.obstacle_speed_range[0],
+                cfg.obstacle_speed_range[1],
+                (count, 1),
+                device=self.device,
+            ).squeeze(1)
+            self.skill_mode[env_ids] = self.SKILL_OBSTACLE
+            self.obstacle_task_active[env_ids] = True
+            self.obstacle_elapsed_steps[env_ids] = 0
             self.line_reference_active[env_ids] = True
             _, _, yaw = euler_from_quat(self.base_quat[env_ids])
             self.command_heading[env_ids] = yaw
@@ -1197,6 +1282,22 @@ class MiniDuck(LeggedRobot):
             self.root_states[env_ids, 3:7] = quat_from_euler_xyz(roll, pitch, yaw)
             self.root_states[env_ids, 7:13] = 0.0
 
+        if self._stage_is("obstacle_crossing"):
+            cfg = self.cfg.skill_curriculum
+            self.root_states[env_ids, 2] += cfg.obstacle_spawn_height_offset_m
+            start_x = (
+                self.env_origins[env_ids, 0]
+                + cfg.obstacle_offset_m
+                - cfg.obstacle_approach_distance_m
+            )
+            self.root_states[env_ids, 0] = start_x + torch_rand_float(
+                -0.02, 0.02, (len(env_ids), 1), device=self.device
+            ).squeeze(1)
+            self.root_states[env_ids, 1] = self.env_origins[env_ids, 1] + torch_rand_float(
+                -0.015, 0.015, (len(env_ids), 1), device=self.device
+            ).squeeze(1)
+            self.root_states[env_ids, 7:13] = 0.0
+
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
@@ -1281,7 +1382,7 @@ class MiniDuck(LeggedRobot):
                 gyro * self.obs_scales.ang_vel,
                 gravity,
                 accelerometer * self.obs_scales.accel,
-                self.commands[:, :3] * self.commands_scale,
+                self._command_observation(),
                 (measured_dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
                 self.dof_vel * self.obs_scales.dof_vel,
                 self.commanded_actions,
@@ -1312,6 +1413,39 @@ class MiniDuck(LeggedRobot):
             # must not receive the standard termination penalty.
             self.time_out_buf = recovered.clone()
             return
+        if self._stage_is("obstacle_crossing"):
+            target_gravity = self.target_projected_gravity.expand_as(
+                self.projected_gravity
+            )
+            alignment = torch.sum(
+                self.projected_gravity * target_gravity, dim=1
+            )
+            fallen = alignment < torch.cos(
+                torch.tensor(
+                    self.cfg.rewards.termination_body_angle,
+                    device=self.device,
+                )
+            )
+            too_low = self.root_states[:, 2] < self.cfg.rewards.termination_height
+            timed_out = self.obstacle_elapsed_steps >= max(
+                1,
+                round(self.cfg.skill_curriculum.obstacle_timeout_s / self.dt),
+            )
+            completed = self._obstacle_success_mask()
+            self.obstacle_success_latched = completed
+            start_x = (
+                self.obstacle_world_x
+                - self.cfg.skill_curriculum.obstacle_approach_distance_m
+            )
+            self.obstacle_progress_latched = self.root_states[:, 0] - start_x
+            regular_timeout = self.episode_length_buf > self.max_episode_length
+            active = self.obstacle_task_active
+            self.reset_buf = fallen | too_low
+            self.reset_buf |= active & (completed | timed_out)
+            self.reset_buf |= (~active) & regular_timeout
+            self.time_out_buf = active & (completed | timed_out)
+            self.time_out_buf |= (~active) & regular_timeout
+            return
         target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
         gravity_alignment = torch.sum(
             self.projected_gravity * target_gravity,
@@ -1324,7 +1458,12 @@ class MiniDuck(LeggedRobot):
             )
         )
         too_low = self.root_states[:, 2] < self.cfg.rewards.termination_height
-        self.reset_buf = fallen | too_low
+        recovery_demo = getattr(
+            self,
+            "demo_recovery_active",
+            torch.zeros_like(fallen),
+        )
+        self.reset_buf = (fallen | too_low) & ~recovery_demo
         self.time_out_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf |= self.time_out_buf
 
@@ -1370,6 +1509,9 @@ class MiniDuck(LeggedRobot):
         return (x_active | y_active | yaw_active).float()
 
     def _stage_is(self, *keys):
+        demo_stage = getattr(self, "demo_action_stage_key", None)
+        if demo_stage is not None:
+            return demo_stage in keys
         stage = self._current_action_stage()
         return stage is not None and stage.key in keys
 
@@ -1642,6 +1784,7 @@ class MiniDuck(LeggedRobot):
         self._apply_straight_heading_hold()
         self._apply_diagonal_heading_hold()
         self._update_recovery_state()
+        self.obstacle_elapsed_steps += self.obstacle_task_active.long()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._update_gait_reference_state()
         push_max_vel = self._current_push_max_vel()
@@ -1883,6 +2026,102 @@ class MiniDuck(LeggedRobot):
         return (
             torch.clamp(torch.square(cross_track / 0.10), max=9.0)
             * self._diagonal_command_mask()
+        )
+
+    def _obstacle_success_mask(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+        cfg = self.cfg.skill_curriculum
+        passed = self.root_states[:, 0] >= (
+            self.obstacle_world_x + cfg.obstacle_success_margin_m
+        )
+        lateral = torch.abs(self.root_states[:, 1] - self.env_origins[:, 1])
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading = torch.abs(torch_wrap_to_pi_minuspi(yaw - self.command_heading))
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target, dim=1)
+        upright = alignment > np.cos(
+            np.deg2rad(cfg.obstacle_heading_tolerance_deg)
+        )
+        return (
+            self.obstacle_task_active
+            & passed
+            & upright
+            & (lateral < cfg.obstacle_lateral_tolerance_m)
+            & (heading < np.deg2rad(cfg.obstacle_heading_tolerance_deg))
+        )
+
+    def _obstacle_near_mask(self):
+        distance = torch.abs(self.obstacle_world_x - self.root_states[:, 0])
+        return (
+            self.obstacle_task_active
+            & (distance < self.cfg.skill_curriculum.obstacle_near_distance_m)
+        ).float()
+
+    def _reward_obstacle_progress(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        commanded = torch.clamp(self.commands[:, 0], min=0.04)
+        progress = torch.clamp(self.base_lin_vel[:, 0] / commanded, 0.0, 1.5)
+        return progress * self.obstacle_task_active.float()
+
+    def _reward_obstacle_clearance(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        foot_height = self.rigid_body_state[:, self.feet_indices, 2]
+        target = (
+            self.env_origins[:, 2]
+            + self.obstacle_heights
+            + self.cfg.skill_curriculum.obstacle_clearance_margin_m
+        )
+        clearance = torch.clamp(
+            (torch.max(foot_height, dim=1).values - target) / 0.025,
+            min=0.0,
+            max=1.0,
+        )
+        return clearance * self._obstacle_near_mask()
+
+    def _reward_obstacle_success(self):
+        return self._obstacle_success_mask().float()
+
+    def _reward_obstacle_heading_error(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        _, _, yaw = euler_from_quat(self.base_quat)
+        error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        return (
+            torch.clamp(torch.square(error / 0.20), max=4.0)
+            * self.obstacle_task_active.float()
+        )
+
+    def _reward_obstacle_lateral_error(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        lateral = self.root_states[:, 1] - self.env_origins[:, 1]
+        return (
+            torch.clamp(torch.square(lateral / 0.10), max=4.0)
+            * self.obstacle_task_active.float()
+        )
+
+    def _reward_obstacle_body_collision(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        body_force = torch.norm(
+            self.contact_forces[:, self.obstacle_body_indices], dim=-1
+        )
+        collision = torch.any(body_force > 5.0, dim=1).float()
+        return collision * self._obstacle_near_mask()
+
+    def _reward_obstacle_stability(self):
+        if not self._stage_is("obstacle_crossing"):
+            return torch.zeros(self.num_envs, device=self.device)
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target, dim=1)
+        return (
+            torch.clamp((alignment + 1.0) * 0.5, 0.0, 1.0)
+            * self.obstacle_task_active.float()
         )
 
     def _reward_alive(self):
