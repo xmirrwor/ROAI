@@ -31,13 +31,15 @@ class BallGoalDemoTests(unittest.TestCase):
         self.assertEqual(kick[5], "stage10")
         self.assertEqual(kick[6], "kick_ready")
 
-    def test_non_kick_scene_parks_ball_below_ground(self):
+    def test_non_kick_scene_parks_ball_outside_view_without_plane_penetration(self):
         sources = (
             ROOT / "legged_panguin" / "envs" / "miniduck" / "miniduck.py",
             ROOT / "legged_panguin" / "scripts" / "play_miniduck.py",
         )
         for source in sources:
-            self.assertIn("ball_height = -1.0", source.read_text(encoding="utf-8"))
+            text = source.read_text(encoding="utf-8")
+            self.assertIn("ball_hidden_offset_m", text)
+            self.assertNotIn("ball_height = -1.0", text)
 
     def test_goal_success_and_alignment_reward_are_present(self):
         env_source = (

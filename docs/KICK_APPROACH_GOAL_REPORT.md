@@ -2,8 +2,10 @@
 
 ## Result
 
-The complete demonstration keeps the ball below the ground in every non-kick
-phase. The kick module starts with a stationary ball 0.45 m in front of the
+The complete demonstration parks the ball 50 m outside the active scene in
+every non-kick phase. Parking it below the plane was rejected because PhysX can
+resolve the penetration by ejecting the ball back into view. The kick module
+starts with a stationary ball 0.45 m in front of the
 robot, uses the verified stage-7 straight-walk expert to approach it, and hands
 off to the stage-10 kick expert before contact. At handoff, a deterministic
 near-ball ready pose clears the incoming gait phase without moving the ball.

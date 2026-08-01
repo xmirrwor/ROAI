@@ -300,14 +300,16 @@ def _set_demo_pose(env, event):
             if event == "ball_scene_reset":
                 ball_distance = env.cfg.skill_curriculum.ball_demo_spawn_distance_m
                 ball_height = env.cfg.scene.ball_radius_m
+                env.ball_root_states[:, 0] = env.env_origins[:, 0] + ball_distance
+                env.ball_root_states[:, 1] = (
+                    env.env_origins[:, 1]
+                    + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
+                )
             else:
-                ball_distance = 0.0
-                ball_height = -1.0
-            env.ball_root_states[:, 0] = env.env_origins[:, 0] + ball_distance
-            env.ball_root_states[:, 1] = (
-                env.env_origins[:, 1]
-                + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
-            )
+                hidden = env.cfg.skill_curriculum.ball_hidden_offset_m
+                ball_height = env.cfg.scene.ball_radius_m
+                env.ball_root_states[:, 0] = env.env_origins[:, 0] + hidden
+                env.ball_root_states[:, 1] = env.env_origins[:, 1] + hidden
             env.ball_root_states[:, 2] = ball_height
             env.ball_root_states[:, 6] = 1.0
             env.ball_start_x[:] = env.ball_root_states[:, 0]
@@ -638,6 +640,15 @@ def play(args, demo):
                 env.compute_observations()
                 obs = env.get_observations()
                 last_actions.zero_()
+            if env.ball_root_states is not None:
+                ball_position = env.ball_root_states[0, :3].detach().cpu().tolist()
+                ball_visible = command_name in ("ball_approach", "ball_kick")
+                print(
+                    "Ball scene state: "
+                    f"visible={ball_visible}; "
+                    f"position_m=({ball_position[0]:.3f}, "
+                    f"{ball_position[1]:.3f}, {ball_position[2]:.3f})"
+                )
             env.skill_mode[:] = skill_mode
             env._schedule_skill_height(
                 torch.arange(env.num_envs, device=env.device), target_height

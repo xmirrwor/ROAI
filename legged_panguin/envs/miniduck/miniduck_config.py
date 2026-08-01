@@ -439,6 +439,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         obstacle_lateral_tolerance_m = 0.15
         obstacle_heading_tolerance_deg = 22.0
         ball_spawn_distance_m = 0.30
+        ball_hidden_offset_m = 50.0
         ball_demo_spawn_distance_m = 0.45
         ball_demo_handoff_distance_m = 0.08
         ball_demo_handoff_lateral_m = -0.06

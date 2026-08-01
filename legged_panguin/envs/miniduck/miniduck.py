@@ -1444,21 +1444,30 @@ class MiniDuck(LeggedRobot):
                     else cfg.ball_spawn_distance_m
                 )
                 ball_height = self.cfg.scene.ball_radius_m
+                self.ball_root_states[env_ids, 0] = (
+                    self.env_origins[env_ids, 0] + spawn_distance
+                )
+                self.ball_root_states[env_ids, 1] = (
+                    self.env_origins[env_ids, 1]
+                    + cfg.ball_spawn_lateral_center_m
+                )
+                self.ball_root_states[env_ids, 1] += torch_rand_float(
+                    -cfg.ball_spawn_lateral_range_m,
+                    cfg.ball_spawn_lateral_range_m,
+                    (len(env_ids), 1),
+                    device=self.device,
+                ).squeeze(1)
             else:
-                # Keep the physical ball loaded but completely outside the
-                # scene until the kick module begins.
-                spawn_distance = 0.0
-                ball_height = -1.0
-            self.ball_root_states[env_ids, 0] = self.env_origins[env_ids, 0] + spawn_distance
-            self.ball_root_states[env_ids, 1] = (
-                self.env_origins[env_ids, 1] + cfg.ball_spawn_lateral_center_m
-            )
-            self.ball_root_states[env_ids, 1] += torch_rand_float(
-                -cfg.ball_spawn_lateral_range_m,
-                cfg.ball_spawn_lateral_range_m,
-                (len(env_ids), 1),
-                device=self.device,
-            ).squeeze(1)
+                # Parking below a plane creates deep penetration and PhysX can
+                # eject the ball back into view. Park it far outside the scene.
+                hidden = cfg.ball_hidden_offset_m
+                self.ball_root_states[env_ids, 0] = (
+                    self.env_origins[env_ids, 0] + hidden
+                )
+                self.ball_root_states[env_ids, 1] = (
+                    self.env_origins[env_ids, 1] + hidden
+                )
+                ball_height = self.cfg.scene.ball_radius_m
             self.ball_root_states[env_ids, 2] = ball_height
             self.ball_root_states[env_ids, 6] = 1.0
             self.ball_start_x[env_ids] = self.ball_root_states[env_ids, 0]
