@@ -26,7 +26,7 @@ def _extra_args():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--protocol",
-        choices=("fall_recovery", "diagonal_motion", "obstacle_crossing"),
+        choices=("fall_recovery", "diagonal_motion", "obstacle_crossing", "ball_kick"),
         required=True,
     )
     parser.add_argument("--duration_s", type=float, default=5.0)
@@ -57,13 +57,18 @@ def _make_env(args, cfg):
         "fall_recovery": 3,
         "diagonal_motion": 4,
         "obstacle_crossing": 5,
+        "ball_kick": 6,
     }
     env_cfg.skill_curriculum.forced_stage = stage_by_protocol[cfg.protocol]
     if cfg.protocol == "obstacle_crossing":
-        mesh_type = os.environ.get("MINIDUCK_OBSTACLE_MESH_TYPE", "heightfield")
-        env_cfg.terrain.mesh_type = mesh_type
-        env_cfg.terrain.obstacle_course = mesh_type != "plane"
+        env_cfg.terrain.mesh_type = "heightfield"
+        env_cfg.terrain.obstacle_course = True
         env_cfg.terrain.max_init_terrain_level = 0
+        env_cfg.scene.obstacle_enabled = True
+    elif cfg.protocol == "ball_kick":
+        env_cfg.terrain.mesh_type = "plane"
+        env_cfg.terrain.obstacle_course = False
+        env_cfg.scene.ball_enabled = True
     env_cfg.noise.add_noise = cfg.randomized
     env_cfg.domain_rand.curriculum_push_robots = False
     env_cfg.domain_rand.push_robots = False
@@ -435,6 +440,131 @@ def _evaluate_obstacle(args, cfg, env, policy, checkpoint, iteration):
     ))
 
 
+def _evaluate_ball(args, cfg, env, policy, checkpoint, iteration):
+    count = env.num_envs
+    ball_cfg = env.cfg.skill_curriculum
+    steps = max(1, round(max(cfg.duration_s, ball_cfg.ball_timeout_s) / env.dt))
+    success = torch.zeros(count, dtype=torch.bool, device=env.device)
+    fallen = torch.zeros_like(success)
+    finished = torch.zeros_like(success)
+    max_progress = torch.zeros(count, device=env.device)
+    max_speed = torch.zeros(count, device=env.device)
+    closest_distance = torch.full((count,), float("inf"), device=env.device)
+    closest_foot_distance = torch.full((count,), float("inf"), device=env.device)
+    start_x = env.ball_start_x.clone()
+    initial_foot_offset = (
+        env.rigid_body_state[:, env.feet_indices, :2]
+        - env.root_states[:, None, :2]
+    ).clone()
+    trajectory = []
+    obs = env.get_observations()
+    for step in range(steps):
+        active = ~finished
+        env.commands[:, :3] = 0.0
+        env.commands[:, 0] = ball_cfg.ball_approach_speed_mps
+        env.skill_mode[:] = env.SKILL_KICK
+        env.ball_task_active[:] = active
+        env._apply_straight_heading_hold()
+        obs[:, 9:12] = env._command_observation()
+        obs[:, 62:64] = env._skill_observation()
+        with torch.no_grad():
+            actions = policy(obs.detach())
+        obs, _, _, dones, _ = env.step(actions.detach())
+        progress = env.ball_progress_latched.clone()
+        speed = torch.clamp(env.ball_root_states[:, 7], min=0.0)
+        relative = env._ball_relative_body()
+        distance = torch.norm(relative[:, :2], dim=1)
+        foot_distance = torch.min(torch.norm(
+            env.rigid_body_state[:, env.feet_indices, :2]
+            - env.ball_root_states[:, None, :2],
+            dim=-1,
+        ), dim=1).values
+        closest_distance = torch.where(active, torch.minimum(closest_distance, distance), closest_distance)
+        closest_foot_distance = torch.where(active, torch.minimum(closest_foot_distance, foot_distance), closest_foot_distance)
+        max_progress = torch.where(active, torch.maximum(max_progress, progress), max_progress)
+        max_speed = torch.where(active, torch.maximum(max_speed, speed), max_speed)
+        just_finished = active & dones.bool()
+        just_success = just_finished & env.ball_success_latched.bool()
+        success |= just_success
+        if step + 1 < steps:
+            fallen |= just_finished & ~just_success
+        finished |= just_finished
+        trajectory.append({
+            "time_s": round((step + 1) * env.dt, 6),
+            "mean_ball_progress_m": float(max_progress[active].mean().item()) if torch.any(active) else float("nan"),
+            "mean_ball_speed_mps": float(speed[active].mean().item()) if torch.any(active) else float("nan"),
+            "mean_robot_ball_distance_m": float(distance[active].mean().item()) if torch.any(active) else float("nan"),
+            "mean_closest_robot_ball_distance_m": float(closest_distance[active].mean().item()) if torch.any(active) else float("nan"),
+            "success_fraction": float(success.float().mean().item()),
+            "fall_fraction": float(fallen.float().mean().item()),
+        })
+        if torch.all(finished):
+            break
+    trials = [{
+        "trial": index,
+        "initial_ball_x_m": float(start_x[index].item()),
+        "max_ball_progress_m": float(max_progress[index].item()),
+        "max_ball_speed_mps": float(max_speed[index].item()),
+        "closest_robot_ball_distance_m": float(closest_distance[index].item()),
+        "closest_foot_ball_distance_m": float(closest_foot_distance[index].item()),
+        "success": bool(success[index].item()),
+        "fell": bool(fallen[index].item()),
+    } for index in range(count)]
+    rate = float(success.float().mean().item())
+    fall_rate = float(fallen.float().mean().item())
+    mean_progress = float(max_progress.mean().item())
+    phase = ball_cfg.ball_phase
+    required_rate = 0.50 if phase == "approach" else 0.25
+    acceptance = {
+        f"success_rate_at_least_{int(required_rate * 100)}pct": rate >= required_rate,
+        "fall_rate_at_most_25pct": fall_rate <= 0.25,
+    }
+    if phase != "approach":
+        acceptance["mean_progress_reaches_phase_target"] = (
+            mean_progress >= ball_cfg.ball_stage10_success_distance_m
+        )
+    result = {
+        "run_label": cfg.run_label or f"ball_{phase}_{iteration}",
+        "protocol_name": f"ball_kick_{phase}",
+        "checkpoint": os.path.abspath(checkpoint),
+        "checkpoint_iteration": iteration,
+        "num_trials": count,
+        "randomized": cfg.randomized,
+        "success_rate": rate,
+        "fall_rate": fall_rate,
+        "mean_max_ball_progress_m": mean_progress,
+        "mean_max_ball_speed_mps": float(max_speed.mean().item()),
+        "mean_closest_robot_ball_distance_m": float(closest_distance.mean().item()),
+        "median_closest_robot_ball_distance_m": _percentile(closest_distance, 0.50),
+        "median_closest_foot_ball_distance_m": _percentile(closest_foot_distance, 0.50),
+        "initial_left_foot_offset_xy_m": [
+            float(initial_foot_offset[:, 0, axis].mean().item()) for axis in range(2)
+        ],
+        "initial_right_foot_offset_xy_m": [
+            float(initial_foot_offset[:, 1, axis].mean().item()) for axis in range(2)
+        ],
+        "acceptance": acceptance,
+        "acceptance_passed": all(acceptance.values()),
+        "provenance": {"aggregation": "raw per-step means and per-trial outcomes; no smoothing", "failed_trials": "retained"},
+    }
+    panels = (
+        (
+            ("mean_robot_ball_distance_m", "Distance (m)", "Current robot-ball distance"),
+            ("mean_closest_robot_ball_distance_m", "Distance (m)", "Closest robot-ball distance"),
+            ("success_fraction", "Fraction", "Cumulative success"),
+            ("fall_fraction", "Fraction", "Falls"),
+        )
+        if phase == "approach"
+        else (
+            ("mean_ball_progress_m", "Progress (m)", "Ball forward displacement"),
+            ("mean_ball_speed_mps", "Speed (m/s)", "Ball forward speed"),
+            ("success_fraction", "Fraction", "Cumulative success"),
+            ("fall_fraction", "Fraction", "Falls"),
+        )
+    )
+    _write_outputs(cfg, result, trajectory, trials, panels)
+
+
 if __name__ == "__main__":
     config = _extra_args()
     base_args = get_args()
@@ -443,5 +573,7 @@ if __name__ == "__main__":
         _evaluate_recovery(base_args, config, environment, inference_policy, checkpoint_path, checkpoint_iteration)
     elif config.protocol == "diagonal_motion":
         _evaluate_diagonal(base_args, config, environment, inference_policy, checkpoint_path, checkpoint_iteration)
-    else:
+    elif config.protocol == "obstacle_crossing":
         _evaluate_obstacle(base_args, config, environment, inference_policy, checkpoint_path, checkpoint_iteration)
+    else:
+        _evaluate_ball(base_args, config, environment, inference_policy, checkpoint_path, checkpoint_iteration)

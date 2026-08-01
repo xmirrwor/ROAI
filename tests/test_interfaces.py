@@ -89,6 +89,28 @@ class InterfaceTests(unittest.TestCase):
         self.assertAlmostEqual(float(obs[-2]), 1.0)
         self.assertAlmostEqual(float(obs[-1]), 0.0)
 
+    def test_kick_command_encodes_relative_ball_without_changing_contract(self):
+        state = RobotState(
+            0.0,
+            ImuSample([0, 0, 0], [0, 0, -1], [0, 0, 0]),
+            JointState(self.cfg.default_actuator, [0] * 10),
+        )
+        builder = ObservationBuilder(self.cfg)
+        obs = builder.build(
+            state,
+            Command(
+                vx=0.10,
+                skill=SkillMode.KICK,
+                ball_relative_x_m=0.25,
+                ball_relative_y_m=-0.05,
+            ),
+        )
+        self.assertEqual(obs.shape, (64,))
+        self.assertAlmostEqual(float(obs[10]), 0.5)
+        self.assertAlmostEqual(float(obs[11]), -0.25)
+        self.assertAlmostEqual(float(obs[-2]), 1.0)
+        self.assertAlmostEqual(float(obs[-1]), 0.0)
+
     def test_straight_command_uses_gyro_heading_hold(self):
         state = RobotState(
             0.0,

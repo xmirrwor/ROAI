@@ -49,12 +49,12 @@ class ActionCurriculumTests(unittest.TestCase):
         self.assertEqual(planned.key, "ball_kick")
         self.assertEqual(active.key, "emergency_stop_stand")
 
-    def test_unimplemented_future_stages_declare_prerequisites(self):
+    def test_all_trained_stages_declare_prerequisites(self):
         for stage in ACTION_STAGES[6:]:
-            self.assertFalse(stage.implemented)
+            self.assertTrue(stage.implemented)
             self.assertTrue(stage.prerequisites)
 
-    def test_trained_skills_through_obstacle_crossing_are_enabled(self):
+    def test_trained_skills_through_ball_kick_are_enabled(self):
         self.assertEqual(
             [stage.key for stage in ACTION_STAGES if stage.implemented],
             [
@@ -64,6 +64,7 @@ class ActionCurriculumTests(unittest.TestCase):
                 "fall_recovery",
                 "diagonal_motion",
                 "obstacle_crossing",
+                "ball_kick",
             ],
         )
 

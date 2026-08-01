@@ -69,6 +69,11 @@ OBSTACLE_SEQUENCE = (
     ("obstacle_approach", (0.12, 0.0, 0.0), 7.0, 4, "nominal"),
 )
 
+BALL_SEQUENCE = (
+    ("prepare_ball", (0.0, 0.0, 0.0), 1.0, 0, "nominal"),
+    ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal"),
+)
+
 # name, command, seconds, skill, height, expert, event, effective stage
 FULL_SEQUENCE = (
     ("stand", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "stage5", "flat_reset", "action_switch"),
@@ -91,6 +96,8 @@ FULL_SEQUENCE = (
     ("backward_right", (-0.08, -0.08, 0.0), 4.0, 1, "nominal", "stage7", None, "diagonal_motion"),
     ("prepare_obstacle", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "obstacle_reset", "action_switch"),
     ("obstacle_crossing", (0.12, 0.0, 0.0), 7.0, 4, "nominal", "stage8", None, "obstacle_crossing"),
+    ("prepare_ball", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "ball_reset", "action_switch"),
+    ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal", "stage10", None, "ball_kick"),
     ("finish_stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal", "stage5", "flat_reset", "action_switch"),
 )
 
@@ -107,6 +114,7 @@ def _demo_args():
             "fall_recovery",
             "diagonal_motion",
             "obstacle_crossing",
+            "ball_kick",
             "full_sequence",
         ),
         default="emergency_stop",
@@ -134,6 +142,10 @@ def _demo_args():
     parser.add_argument(
         "--stage8_checkpoint_path",
         default="checkpoints/miniduck_stage8_obstacle_model_selected.pt",
+    )
+    parser.add_argument(
+        "--stage10_checkpoint_path",
+        default="checkpoints/miniduck_stage10_ball_kick_model_selected.pt",
     )
     parser.add_argument("--policy_transition_s", type=float, default=0.35)
     known, remaining = parser.parse_known_args()
@@ -191,6 +203,17 @@ def _configure_obstacle_env(env_cfg):
     env_cfg.terrain.curriculum = False
     env_cfg.terrain.max_init_terrain_level = 0
     env_cfg.skill_curriculum.forced_stage = 5
+    env_cfg.scene.obstacle_enabled = True
+
+
+def _configure_ball_env(env_cfg):
+    env_cfg.terrain.mesh_type = "plane"
+    env_cfg.terrain.obstacle_course = False
+    env_cfg.terrain.num_rows = 1
+    env_cfg.terrain.num_cols = 1
+    env_cfg.terrain.curriculum = False
+    env_cfg.skill_curriculum.forced_stage = 6
+    env_cfg.scene.ball_enabled = True
 
 
 def _load_named_policy(env, args, train_cfg, checkpoint_path):
@@ -228,9 +251,10 @@ def _set_demo_pose(env, event):
     else:
         env.root_states[:] = env.base_init_state
         env.root_states[:, :3] += env.env_origins
-        env.root_states[:, 2] += (
-            env.cfg.skill_curriculum.obstacle_spawn_height_offset_m
-        )
+        if env.cfg.terrain.mesh_type in ("heightfield", "trimesh"):
+            env.root_states[:, 2] += (
+                env.cfg.skill_curriculum.obstacle_spawn_height_offset_m
+            )
         if event == "obstacle_reset":
             env.root_states[:, 0] = (
                 env.obstacle_world_x
@@ -251,10 +275,30 @@ def _set_demo_pose(env, event):
     env.gait_contacts[:] = False
     env.gait_last_contacts[:] = False
     env.gait_first_contacts[:] = 0.0
-    env_ids_int32 = env_ids.to(dtype=torch.int32)
+    actor_ids = env._robot_actor_ids(env_ids)
+    if event == "ball_reset" and env.ball_root_states is not None:
+        env.ball_root_states[:] = 0.0
+        env.ball_root_states[:, 0] = (
+            env.env_origins[:, 0]
+            + env.cfg.skill_curriculum.ball_kick_spawn_distance_m
+        )
+        env.ball_root_states[:, 1] = (
+            env.env_origins[:, 1]
+            + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
+        )
+        env.ball_root_states[:, 2] = env.cfg.scene.ball_radius_m
+        env.ball_root_states[:, 6] = 1.0
+        env.ball_start_x[:] = env.ball_root_states[:, 0]
+        env.ball_elapsed_steps[:] = 0
+        env.ball_success_latched[:] = False
+        actor_ids = torch.cat((
+            actor_ids,
+            actor_ids + env.scene_actor_slots["ball"],
+        ))
+    env_ids_int32 = actor_ids.to(dtype=torch.int32)
     env.gym.set_actor_root_state_tensor_indexed(
         env.sim,
-        gymtorch.unwrap_tensor(env.root_states),
+        gymtorch.unwrap_tensor(env._all_root_states),
         gymtorch.unwrap_tensor(env_ids_int32),
         len(env_ids_int32),
     )
@@ -276,6 +320,13 @@ def _set_demo_pose(env, event):
         env.set_camera(
             [origin_x + 1.20, origin_y - 1.35, 0.70],
             [origin_x + 0.35, origin_y, 0.12],
+        )
+    elif event == "ball_reset":
+        ball_x = float(env.ball_root_states[0, 0].item())
+        ball_y = float(env.ball_root_states[0, 1].item())
+        env.set_camera(
+            [ball_x + 0.65, ball_y - 1.00, 0.52],
+            [ball_x - 0.10, ball_y, 0.08],
         )
 
 
@@ -341,8 +392,19 @@ def play(args, demo):
         env_cfg.skill_curriculum.forced_stage = 3
     elif demo.demo == "diagonal_motion":
         env_cfg.skill_curriculum.forced_stage = 4
-    elif demo.demo in ("obstacle_crossing", "full_sequence"):
+    elif demo.demo == "obstacle_crossing":
         _configure_obstacle_env(env_cfg)
+    elif demo.demo == "ball_kick":
+        _configure_ball_env(env_cfg)
+    elif demo.demo == "full_sequence":
+        _configure_obstacle_env(env_cfg)
+        # The remote GPU viewer can deadlock when heightfield rendering and two
+        # extra actors are combined. The full-chain demo uses the visible box
+        # as its physical obstacle; quantitative stage-8 evaluation remains on
+        # the trained heightfield.
+        env_cfg.terrain.mesh_type = "plane"
+        env_cfg.terrain.obstacle_course = False
+        env_cfg.scene.ball_enabled = True
     if demo.demo == "full_sequence":
         env_cfg.env.episode_length_s = 200.0
     env_cfg.viewer.pos = [1.20, -1.20, 0.65] if demo.fixed_camera else [0.45, -0.45, 0.35]
@@ -389,6 +451,7 @@ def play(args, demo):
             ("stage6", demo.stage6_checkpoint_path),
             ("stage7", demo.stage7_checkpoint_path),
             ("stage8", demo.stage8_checkpoint_path),
+            ("stage10", demo.stage10_checkpoint_path),
         ):
             named_runner, named_policy, named_iteration = _load_named_policy(
                 env, args, train_cfg, path
@@ -434,6 +497,8 @@ def play(args, demo):
         base_sequence = DIAGONAL_SEQUENCE
     elif demo.demo == "obstacle_crossing":
         base_sequence = OBSTACLE_SEQUENCE
+    elif demo.demo == "ball_kick":
+        base_sequence = BALL_SEQUENCE
     elif demo.demo == "full_sequence":
         sequence = FULL_SEQUENCE
     else:
@@ -445,6 +510,8 @@ def play(args, demo):
             stage_key = "fall_recovery"
         elif demo.demo == "obstacle_crossing":
             stage_key = "obstacle_crossing"
+        elif demo.demo == "ball_kick":
+            stage_key = "ball_kick"
         else:
             stage_key = "action_switch"
         sequence = tuple(
@@ -495,6 +562,7 @@ def play(args, demo):
                 "fall_recovery",
             )
             env.obstacle_task_active[:] = skill_mode == env.SKILL_OBSTACLE
+            env.ball_task_active[:] = skill_mode == env.SKILL_KICK
             if event is not None:
                 _set_demo_pose(env, event)
                 env.compute_observations()
@@ -562,6 +630,13 @@ def play(args, demo):
                 print(
                     "Obstacle trial completed; "
                     f"success={bool(env.obstacle_success_latched[0].item())}"
+                )
+                step += sequence_steps[command_index] - cycle_step - 1
+            elif demo.demo == "full_sequence" and command_name == "ball_kick":
+                print(
+                    "Ball trial completed; "
+                    f"success={bool(env.ball_success_latched[0].item())}; "
+                    f"progress_m={float(env.ball_progress_latched[0].item()):.3f}"
                 )
                 step += sequence_steps[command_index] - cycle_step - 1
             elif demo.demo == "full_sequence":

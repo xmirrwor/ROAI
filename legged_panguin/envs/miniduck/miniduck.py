@@ -8,7 +8,7 @@ import pickle
 
 import numpy as np
 import torch
-from isaacgym import gymtorch
+from isaacgym import gymapi, gymtorch
 from isaacgym.torch_utils import (
     euler_from_quat,
     quat_from_euler_xyz,
@@ -26,6 +26,78 @@ class MiniDuck(LeggedRobot):
     SKILL_SQUAT = 2
     SKILL_RECOVERY = 3
     SKILL_OBSTACLE = 4
+    SKILL_KICK = 5
+
+    def _create_additional_assets(self):
+        assets = []
+        self.scene_actor_slots = {}
+        self.scene_body_slots = {}
+        self.additional_actor_handles = {}
+        scene = self.cfg.scene
+        if scene.obstacle_enabled:
+            height = float(min(self.cfg.terrain.obstacle_height_range))
+            options = gymapi.AssetOptions()
+            options.fix_base_link = True
+            options.disable_gravity = True
+            asset = self.gym.create_box(
+                self.sim,
+                self.cfg.terrain.obstacle_depth_m,
+                self.cfg.terrain.obstacle_width_m,
+                height,
+                options,
+            )
+            assets.append(("obstacle", asset, height))
+        if scene.ball_enabled:
+            options = gymapi.AssetOptions()
+            volume = 4.0 / 3.0 * np.pi * scene.ball_radius_m ** 3
+            options.density = scene.ball_mass_kg / volume
+            asset = self.gym.create_sphere(
+                self.sim, scene.ball_radius_m, options
+            )
+            shape_props = self.gym.get_asset_rigid_shape_properties(asset)
+            for prop in shape_props:
+                prop.friction = scene.ball_friction
+                prop.restitution = scene.ball_restitution
+            self.gym.set_asset_rigid_shape_properties(asset, shape_props)
+            assets.append(("ball", asset, scene.ball_radius_m))
+        for index, (name, _, _) in enumerate(assets):
+            self.scene_actor_slots[name] = index + 1
+            self.scene_body_slots[name] = self.num_bodies + index
+            self.additional_actor_handles[name] = []
+        return assets
+
+    def _create_additional_actors(self, env_handle, env_id, assets):
+        if not assets:
+            return
+        for name, asset, vertical_center in assets:
+            pose = gymapi.Transform()
+            origin = self.env_origins[env_id]
+            if name == "obstacle":
+                pose.p = gymapi.Vec3(
+                    float(origin[0]) + self.cfg.skill_curriculum.obstacle_offset_m,
+                    float(origin[1]),
+                    vertical_center / 2.0,
+                )
+                color = self.cfg.scene.obstacle_color
+            else:
+                pose.p = gymapi.Vec3(
+                    float(origin[0]) + self.cfg.skill_curriculum.ball_spawn_distance_m,
+                    float(origin[1]) + self.cfg.skill_curriculum.ball_spawn_lateral_center_m,
+                    vertical_center,
+                )
+                color = self.cfg.scene.ball_color
+            collision_filter = 1 if name == "obstacle" else 0
+            handle = self.gym.create_actor(
+                env_handle, asset, pose, name, env_id, collision_filter, 0
+            )
+            self.gym.set_rigid_body_color(
+                env_handle,
+                handle,
+                0,
+                gymapi.MESH_VISUAL_AND_COLLISION,
+                gymapi.Vec3(*color),
+            )
+            self.additional_actor_handles[name].append(handle)
 
     def _init_buffers(self):
         super()._init_buffers()
@@ -98,7 +170,7 @@ class MiniDuck(LeggedRobot):
         else:
             self.obstacle_heights = torch.full(
                 (self.num_envs,),
-                float(self.cfg.terrain.obstacle_height_range[0]),
+                float(min(self.cfg.terrain.obstacle_height_range)),
                 device=self.device,
             )
         body_mask = torch.ones(
@@ -108,6 +180,30 @@ class MiniDuck(LeggedRobot):
         self.obstacle_body_indices = torch.arange(
             self.contact_forces.shape[1], device=self.device
         )[body_mask]
+        ball_enabled = "ball" in self.scene_actor_slots
+        self.ball_task_active = torch.full(
+            (self.num_envs,),
+            ball_enabled and self._stage_is("ball_kick"),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self.ball_elapsed_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.ball_success_latched = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.ball_progress_latched = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        if ball_enabled:
+            self.ball_root_states = self.actor_root_states[
+                :, self.scene_actor_slots["ball"], :
+            ]
+            self.ball_start_x = self.ball_root_states[:, 0].clone()
+        else:
+            self.ball_root_states = None
+            self.ball_start_x = torch.zeros(self.num_envs, device=self.device)
 
         max_action_delay = self.cfg.domain_rand.max_action_delay
         self.action_delay_buffer = torch.zeros(
@@ -147,9 +243,10 @@ class MiniDuck(LeggedRobot):
         self.previous_motor_targets = self.default_dof_pos.repeat(self.num_envs, 1)
 
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(
-            self.num_envs, self.num_bodies, 13
+        self._all_rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(
+            self.num_envs, self.num_bodies_per_env, 13
         )
+        self.rigid_body_state = self._all_rigid_body_state[:, :self.num_bodies, :]
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._load_teacher_reference()
         self.gait_phase_steps = torch.zeros(
@@ -289,6 +386,23 @@ class MiniDuck(LeggedRobot):
         if torch.any(obstacle):
             distance = self.obstacle_world_x[obstacle] - self.root_states[obstacle, 0]
             features[obstacle, 1] = torch.clamp(distance / 0.80, -1.0, 1.0)
+        kick = (
+            (self.skill_mode == self.SKILL_KICK)
+            & self.ball_task_active
+            & (self.ball_root_states is not None)
+        )
+        if torch.any(kick):
+            relative_world = torch.zeros(
+                self.num_envs, 3, dtype=self.root_states.dtype, device=self.device
+            )
+            relative_world[:, :2] = (
+                self.ball_root_states[:, :2] - self.root_states[:, :2]
+            )
+            relative_body = quat_rotate_inverse(self.base_quat, relative_world)
+            features[kick, 1] = torch.clamp(
+                relative_body[kick, 0] / 0.50, -1.0, 1.0
+            )
+            features[kick, 2] = torch.clamp(relative_body[kick, 1] / 0.20, -1.0, 1.0)
         return features
 
     def _schedule_skill_height(self, env_ids, goal_height):
@@ -526,6 +640,10 @@ class MiniDuck(LeggedRobot):
         self.recovery_upright_steps[env_ids] = 0
         self.obstacle_elapsed_steps[env_ids] = 0
         self.obstacle_task_active[env_ids] = self._stage_is("obstacle_crossing")
+        self.ball_elapsed_steps[env_ids] = 0
+        self.ball_task_active[env_ids] = (
+            self.ball_root_states is not None and self._stage_is("ball_kick")
+        )
         self._randomize_dynamic_properties(env_ids)
 
         self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
@@ -861,6 +979,8 @@ class MiniDuck(LeggedRobot):
             return min(0.02, cfg.advanced_max_push_vel_xy)
         if action_stage is not None and action_stage.key == "obstacle_crossing":
             return 0.0
+        if action_stage is not None and action_stage.key == "ball_kick":
+            return 0.0
         if not cfg.curriculum_push_robots:
             return cfg.max_push_vel_xy if cfg.push_robots else 0.0
         progress = self._ramp_progress(
@@ -1064,6 +1184,20 @@ class MiniDuck(LeggedRobot):
             )
             return
 
+        if action_stage is not None and action_stage.key == "ball_kick":
+            cfg = self.cfg.skill_curriculum
+            self.commands[env_ids, :3] = 0.0
+            self.commands[env_ids, 0] = cfg.ball_approach_speed_mps
+            self.skill_mode[env_ids] = self.SKILL_KICK
+            self.ball_task_active[env_ids] = True
+            self.ball_elapsed_steps[env_ids] = 0
+            self.line_reference_active[env_ids] = True
+            _, _, yaw = euler_from_quat(self.base_quat[env_ids])
+            self.command_heading[env_ids] = yaw
+            self.command_start_xy[env_ids] = self.root_states[env_ids, :2]
+            self._schedule_skill_height(env_ids, cfg.nominal_body_height_m)
+            return
+
         self.commands[env_ids, :3] = 0.0
         _, _, yaw = euler_from_quat(self.base_quat[env_ids])
         self.command_heading[env_ids] = yaw
@@ -1196,7 +1330,7 @@ class MiniDuck(LeggedRobot):
             )
         self.dof_vel[env_ids] = 0.0
 
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        env_ids_int32 = self._robot_actor_ids(env_ids).to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.dof_state),
@@ -1298,10 +1432,37 @@ class MiniDuck(LeggedRobot):
             ).squeeze(1)
             self.root_states[env_ids, 7:13] = 0.0
 
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        actor_ids = self._robot_actor_ids(env_ids)
+        if self.ball_root_states is not None:
+            cfg = self.cfg.skill_curriculum
+            ball_slot = self.scene_actor_slots["ball"]
+            self.ball_root_states[env_ids] = 0.0
+            if self._stage_is("ball_kick"):
+                spawn_distance = (
+                    cfg.ball_kick_spawn_distance_m
+                    if cfg.ball_phase == "kick"
+                    else cfg.ball_spawn_distance_m
+                )
+            else:
+                spawn_distance = 4.0
+            self.ball_root_states[env_ids, 0] = self.env_origins[env_ids, 0] + spawn_distance
+            self.ball_root_states[env_ids, 1] = (
+                self.env_origins[env_ids, 1] + cfg.ball_spawn_lateral_center_m
+            )
+            self.ball_root_states[env_ids, 1] += torch_rand_float(
+                -cfg.ball_spawn_lateral_range_m,
+                cfg.ball_spawn_lateral_range_m,
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze(1)
+            self.ball_root_states[env_ids, 2] = self.cfg.scene.ball_radius_m
+            self.ball_root_states[env_ids, 6] = 1.0
+            self.ball_start_x[env_ids] = self.ball_root_states[env_ids, 0]
+            actor_ids = torch.cat((actor_ids, actor_ids + ball_slot))
+        env_ids_int32 = actor_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
-            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(self._all_root_states),
             gymtorch.unwrap_tensor(env_ids_int32),
             len(env_ids_int32),
         )
@@ -1445,6 +1606,23 @@ class MiniDuck(LeggedRobot):
             self.reset_buf |= (~active) & regular_timeout
             self.time_out_buf = active & (completed | timed_out)
             self.time_out_buf |= (~active) & regular_timeout
+            return
+        if self._stage_is("ball_kick"):
+            target = self.target_projected_gravity.expand_as(self.projected_gravity)
+            alignment = torch.sum(self.projected_gravity * target, dim=1)
+            fallen = alignment < torch.cos(torch.tensor(
+                self.cfg.rewards.termination_body_angle, device=self.device
+            ))
+            too_low = self.root_states[:, 2] < self.cfg.rewards.termination_height
+            timed_out = self.ball_elapsed_steps >= max(
+                1, round(self.cfg.skill_curriculum.ball_timeout_s / self.dt)
+            )
+            completed = self._ball_success_mask()
+            self.ball_success_latched = completed
+            self.ball_progress_latched = self.ball_root_states[:, 0] - self.ball_start_x
+            active = self.ball_task_active
+            self.reset_buf = fallen | too_low | (active & (completed | timed_out))
+            self.time_out_buf = active & (completed | timed_out)
             return
         target_gravity = self.target_projected_gravity.expand_as(self.projected_gravity)
         gravity_alignment = torch.sum(
@@ -1785,6 +1963,7 @@ class MiniDuck(LeggedRobot):
         self._apply_diagonal_heading_hold()
         self._update_recovery_state()
         self.obstacle_elapsed_steps += self.obstacle_task_active.long()
+        self.ball_elapsed_steps += self.ball_task_active.long()
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._update_gait_reference_state()
         push_max_vel = self._current_push_max_vel()
@@ -1820,7 +1999,7 @@ class MiniDuck(LeggedRobot):
             -max_vel, max_vel, (self.num_envs, 2), device=self.device
         )
         self.gym.set_actor_root_state_tensor(
-            self.sim, gymtorch.unwrap_tensor(self.root_states)
+            self.sim, gymtorch.unwrap_tensor(self._all_root_states)
         )
 
     def _reward_emergency_stop_stability(self):
@@ -2123,6 +2302,88 @@ class MiniDuck(LeggedRobot):
             torch.clamp((alignment + 1.0) * 0.5, 0.0, 1.0)
             * self.obstacle_task_active.float()
         )
+
+    def _ball_relative_body(self):
+        relative_world = torch.zeros(
+            self.num_envs, 3, dtype=self.root_states.dtype, device=self.device
+        )
+        if self.ball_root_states is not None:
+            relative_world[:, :2] = self.ball_root_states[:, :2] - self.root_states[:, :2]
+        return quat_rotate_inverse(self.base_quat, relative_world)
+
+    def _ball_success_mask(self):
+        if not self._stage_is("ball_kick") or self.ball_root_states is None:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        cfg = self.cfg.skill_curriculum
+        progress = self.ball_root_states[:, 0] - self.ball_start_x
+        lateral = torch.abs(self.ball_root_states[:, 1] - self.env_origins[:, 1])
+        relative = self._ball_relative_body()
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        upright = torch.sum(self.projected_gravity * target, dim=1) > 0.75
+        if cfg.ball_phase == "approach":
+            task_reached = (
+                (relative[:, 0] <= cfg.ball_contact_distance_m)
+                & (relative[:, 0] >= -0.03)
+                & (torch.abs(relative[:, 1]) <= 0.10)
+            )
+        else:
+            task_reached = progress >= cfg.ball_stage10_success_distance_m
+        return self.ball_task_active & task_reached & (
+            lateral <= cfg.ball_target_lateral_tolerance_m
+        ) & upright
+
+    def _reward_ball_approach(self):
+        if self.ball_root_states is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        if self.cfg.skill_curriculum.ball_phase == "approach":
+            relative = self._ball_relative_body()
+            distance_error = torch.abs(relative[:, 0] - 0.09)
+            lateral_error = torch.abs(relative[:, 1])
+            score = torch.exp(-8.0 * distance_error) * torch.exp(-12.0 * lateral_error)
+        else:
+            foot_distance = torch.min(torch.norm(
+                self.rigid_body_state[:, self.feet_indices, :2]
+                - self.ball_root_states[:, None, :2],
+                dim=-1,
+            ), dim=1).values
+            score = torch.exp(-12.0 * foot_distance)
+        return score * self.ball_task_active.float()
+
+    def _reward_ball_forward_velocity(self):
+        if self.ball_root_states is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        return torch.clamp(self.ball_root_states[:, 7] / 0.70, 0.0, 1.5) * self.ball_task_active.float()
+
+    def _reward_ball_progress(self):
+        if self.ball_root_states is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cfg = self.cfg.skill_curriculum
+        target = cfg.ball_stage9_success_distance_m if cfg.ball_phase == "approach" else cfg.ball_stage10_success_distance_m
+        progress = torch.clamp((self.ball_root_states[:, 0] - self.ball_start_x) / target, 0.0, 1.5)
+        return progress * self.ball_task_active.float()
+
+    def _reward_ball_contact(self):
+        if self.ball_root_states is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        feet_xy = self.rigid_body_state[:, self.feet_indices, :2]
+        distance = torch.norm(feet_xy - self.ball_root_states[:, None, :2], dim=-1)
+        nearest, nearest_index = torch.min(distance, dim=1)
+        foot_forward_velocity = self.rigid_body_state[
+            torch.arange(self.num_envs, device=self.device),
+            self.feet_indices[nearest_index],
+            7,
+        ]
+        proximity = torch.exp(-24.0 * nearest)
+        swing = 0.5 + torch.clamp(foot_forward_velocity / 0.40, 0.0, 1.5)
+        return proximity * swing * self.ball_task_active.float()
+
+    def _reward_ball_success(self):
+        return self._ball_success_mask().float()
+
+    def _reward_ball_stability(self):
+        target = self.target_projected_gravity.expand_as(self.projected_gravity)
+        alignment = torch.sum(self.projected_gravity * target, dim=1)
+        return torch.clamp((alignment + 1.0) * 0.5, 0.0, 1.0) * self.ball_task_active.float()
 
     def _reward_alive(self):
         return torch.ones(self.num_envs, device=self.device)

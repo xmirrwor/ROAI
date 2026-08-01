@@ -17,6 +17,7 @@ class SkillMode(str, Enum):
     SQUAT = "squat"
     RECOVERY = "recovery"
     OBSTACLE = "obstacle"
+    KICK = "kick"
 
 
 def _vector(name: str, values: Sequence[float], size: int) -> tuple[float, ...]:
@@ -37,6 +38,8 @@ class Command:
     body_height_m: float | None = None
     obstacle_distance_m: float | None = None
     obstacle_height_m: float | None = None
+    ball_relative_x_m: float | None = None
+    ball_relative_y_m: float | None = None
 
 
 @dataclass(frozen=True)

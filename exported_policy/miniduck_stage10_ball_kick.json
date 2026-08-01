@@ -1,0 +1,166 @@
+{
+  "checkpoint_path": "/root/miniducktraining/ROAI/checkpoints/miniduck_stage10_ball_kick_model_selected.pt",
+  "onnx_path": "/root/miniducktraining/ROAI/exported_policy/miniduck_stage10_ball_kick.onnx",
+  "obs_size": 64,
+  "action_size": 10,
+  "joint_names": [
+    "left_hip_yaw",
+    "left_hip_roll",
+    "left_hip_pitch",
+    "left_knee",
+    "left_ankle",
+    "right_hip_yaw",
+    "right_hip_roll",
+    "right_hip_pitch",
+    "right_knee",
+    "right_ankle"
+  ],
+  "default_actuator": [
+    0.0,
+    0.0,
+    -0.399379879236,
+    1.5,
+    -0.623843669891,
+    0.0,
+    0.0,
+    0.399379879236,
+    1.5,
+    -0.623843669891
+  ],
+  "action_scale": 0.25,
+  "policy_dt": 0.02,
+  "sim_dt": 0.005,
+  "decimation": 4,
+  "gait_phase_period_steps": 27,
+  "nominal_motor_velocity": 5.24,
+  "nominal_body_height_m": 0.143,
+  "squat_body_height_m": 0.132,
+  "heading_hold_kp": 2.5,
+  "heading_hold_kd": 0.3,
+  "heading_hold_max_yaw_rate": 0.45,
+  "line_hold_kp": 2.0,
+  "line_hold_kd": 0.35,
+  "line_hold_max_lateral_mps": 0.16,
+  "heading_hold_stop_s": 2.0,
+  "command_ranges": {
+    "lin_vel_x": [
+      -0.08,
+      0.1
+    ],
+    "lin_vel_y": [
+      -0.1,
+      0.1
+    ],
+    "ang_vel_yaw": [
+      -0.45,
+      0.45
+    ]
+  },
+  "command_min_abs": {
+    "lin_vel_x": 0.025,
+    "lin_vel_y": 0.015,
+    "ang_vel_yaw": 0.06
+  },
+  "obs_scales": {
+    "ang_vel": 0.25,
+    "gravity": 1.0,
+    "accel": 0.1,
+    "command": [
+      2.0,
+      2.0,
+      0.25
+    ],
+    "dof_pos": 1.0,
+    "dof_vel": 0.05
+  },
+  "base_init_pos": [
+    0.0,
+    0.0,
+    0.115629099309
+  ],
+  "base_init_quat_xyzw": [
+    0.0,
+    0.224055365304,
+    0.0,
+    0.974576417362
+  ],
+  "base_init_quat_wxyz": [
+    0.974576417362,
+    0.0,
+    0.224055365304,
+    0.0
+  ],
+  "obs_layout": {
+    "gyro": [
+      0,
+      3
+    ],
+    "gravity": [
+      3,
+      6
+    ],
+    "accelerometer": [
+      6,
+      9
+    ],
+    "command": [
+      9,
+      12
+    ],
+    "joint_pos_error": [
+      12,
+      22
+    ],
+    "joint_vel": [
+      22,
+      32
+    ],
+    "action_t": [
+      32,
+      42
+    ],
+    "action_t_minus_1": [
+      42,
+      52
+    ],
+    "action_t_minus_2": [
+      52,
+      62
+    ],
+    "gait_phase_or_skill_target": [
+      62,
+      64
+    ]
+  },
+  "skill_encoding": {
+    "locomotion": "[cos(gait_phase), sin(gait_phase)]",
+    "stand": [
+      1.0,
+      0.0
+    ],
+    "squat": "[1 - 2 * normalized_depth, 1]",
+    "recovery": [
+      -1.0,
+      -1.0
+    ],
+    "obstacle": "[cos(gait_phase), sin(gait_phase)]",
+    "kick": "[cos(gait_phase), sin(gait_phase)]"
+  },
+  "obstacle_distance_encoding": {
+    "observation_index": 10,
+    "value": "clip(obstacle_distance_m / 0.80, -1, 1)",
+    "scope": "obstacle skill only; replaces the unused lateral command feature"
+  },
+  "ball_relative_position_encoding": {
+    "observation_indexes": [
+      10,
+      11
+    ],
+    "value": [
+      "clip(ball_relative_x_m / 0.50, -1, 1)",
+      "clip(ball_relative_y_m / 0.20, -1, 1)"
+    ],
+    "scope": "kick skill only; replaces lateral and yaw command features"
+  },
+  "symmetric_inference": false
+}

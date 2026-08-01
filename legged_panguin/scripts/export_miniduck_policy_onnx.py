@@ -140,11 +140,20 @@ def build_metadata(checkpoint_path, output_onnx):
             "squat": "[1 - 2 * normalized_depth, 1]",
             "recovery": [-1.0, -1.0],
             "obstacle": "[cos(gait_phase), sin(gait_phase)]",
+            "kick": "[cos(gait_phase), sin(gait_phase)]",
         },
         "obstacle_distance_encoding": {
             "observation_index": 10,
             "value": "clip(obstacle_distance_m / 0.80, -1, 1)",
             "scope": "obstacle skill only; replaces the unused lateral command feature",
+        },
+        "ball_relative_position_encoding": {
+            "observation_indexes": [10, 11],
+            "value": [
+                "clip(ball_relative_x_m / 0.50, -1, 1)",
+                "clip(ball_relative_y_m / 0.20, -1, 1)",
+            ],
+            "scope": "kick skill only; replaces lateral and yaw command features",
         },
         "symmetric_inference": False,
     }

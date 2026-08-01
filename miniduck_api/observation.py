@@ -69,7 +69,7 @@ class ObservationBuilder:
         skill = command.skill
         if skill == SkillMode.AUTO:
             skill = SkillMode.STAND if stationary else SkillMode.LOCOMOTION
-        if skill not in (SkillMode.LOCOMOTION, SkillMode.OBSTACLE):
+        if skill not in (SkillMode.LOCOMOTION, SkillMode.OBSTACLE, SkillMode.KICK):
             # Training pins zero-command emergency stops to the nominal stand
             # phase; deployment must build the same observation.
             self.step_index = 0
@@ -84,6 +84,18 @@ class ObservationBuilder:
         elif skill == SkillMode.OBSTACLE:
             distance = 0.0 if command.obstacle_distance_m is None else float(command.obstacle_distance_m)
             command_features[1] = np.clip(distance / 0.80, -1.0, 1.0)
+            skill_features = np.asarray([math.cos(angle), math.sin(angle)])
+        elif skill == SkillMode.KICK:
+            command_features[1] = np.clip(
+                (0.0 if command.ball_relative_x_m is None else command.ball_relative_x_m) / 0.50,
+                -1.0,
+                1.0,
+            )
+            command_features[2] = np.clip(
+                (0.0 if command.ball_relative_y_m is None else command.ball_relative_y_m) / 0.20,
+                -1.0,
+                1.0,
+            )
             skill_features = np.asarray([math.cos(angle), math.sin(angle)])
         elif skill == SkillMode.SQUAT:
             target_height = (

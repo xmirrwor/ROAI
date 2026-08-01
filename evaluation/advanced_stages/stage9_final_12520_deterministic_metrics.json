@@ -1,0 +1,32 @@
+{
+  "run_label": "stage9_final_12520",
+  "protocol_name": "ball_kick_approach",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Aug01_16-54-04_stage9_ball_approach_200/model_12520.pt",
+  "checkpoint_iteration": 12520,
+  "num_trials": 64,
+  "randomized": false,
+  "success_rate": 0.578125,
+  "fall_rate": 0.015625,
+  "mean_max_ball_progress_m": 0.0,
+  "mean_max_ball_speed_mps": 0.0,
+  "mean_closest_robot_ball_distance_m": 0.1441328525543213,
+  "median_closest_robot_ball_distance_m": 0.11735174059867859,
+  "median_closest_foot_ball_distance_m": 0.19045089185237885,
+  "initial_left_foot_offset_xy_m": [
+    -0.043908730149269104,
+    0.1091093122959137
+  ],
+  "initial_right_foot_offset_xy_m": [
+    -0.04344765096902847,
+    -0.07206717878580093
+  ],
+  "acceptance": {
+    "success_rate_at_least_50pct": true,
+    "fall_rate_at_most_25pct": true
+  },
+  "acceptance_passed": true,
+  "provenance": {
+    "aggregation": "raw per-step means and per-trial outcomes; no smoothing",
+    "failed_trials": "retained"
+  }
+}

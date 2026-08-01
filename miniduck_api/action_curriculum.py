@@ -60,7 +60,7 @@ ACTION_STAGES = (
         6,
         "ball_kick",
         "Approach and kick a simulated ball toward a target.",
-        False,
+        True,
         ("ball_actor", "ball_observation", "kick_target_reward"),
     ),
 )
