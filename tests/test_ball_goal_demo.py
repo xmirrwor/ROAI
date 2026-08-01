@@ -25,8 +25,11 @@ class BallGoalDemoTests(unittest.TestCase):
         names = [item[0] for item in sequence]
         self.assertLess(names.index("ball_approach"), names.index("ball_kick"))
         approach = sequence[names.index("ball_approach")]
+        kick = sequence[names.index("ball_kick")]
         self.assertEqual(approach[5], "stage7")
         self.assertEqual(approach[6], "ball_scene_reset")
+        self.assertEqual(kick[5], "stage10")
+        self.assertEqual(kick[6], "kick_ready")
 
     def test_non_kick_scene_parks_ball_below_ground(self):
         sources = (

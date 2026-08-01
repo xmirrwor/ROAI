@@ -97,7 +97,7 @@ FULL_SEQUENCE = (
     ("prepare_obstacle", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "obstacle_reset", "action_switch"),
     ("obstacle_crossing", (0.12, 0.0, 0.0), 7.0, 4, "nominal", "stage8", None, "obstacle_crossing"),
     ("ball_approach", (0.12, 0.0, 0.0), 10.0, 1, "nominal", "stage7", "ball_scene_reset", "action_switch"),
-    ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal", "stage10", None, "ball_kick"),
+    ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal", "stage10", "kick_ready", "ball_kick"),
     ("finish_stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal", "stage5", "flat_reset", "action_switch"),
 )
 
@@ -248,6 +248,20 @@ def _set_demo_pose(env, event):
         env.root_states[:, 3:7] = quat_from_euler_xyz(roll, pitch, yaw)
         env.demo_recovery_active[:] = True
         env.obstacle_task_active[:] = False
+    elif event == "kick_ready":
+        ball_xy = env.ball_root_states[:, :2].clone()
+        env.root_states[:] = env.base_init_state
+        env.root_states[:, :3] += env.env_origins
+        env.root_states[:, 0] = (
+            ball_xy[:, 0]
+            - env.cfg.skill_curriculum.ball_kick_spawn_distance_m
+        )
+        env.root_states[:, 1] = (
+            ball_xy[:, 1]
+            - env.cfg.skill_curriculum.ball_spawn_lateral_center_m
+        )
+        env.obstacle_task_active[:] = False
+        env.demo_recovery_active[:] = False
     else:
         env.root_states[:] = env.base_init_state
         env.root_states[:, :3] += env.env_origins
@@ -277,27 +291,32 @@ def _set_demo_pose(env, event):
     env.gait_first_contacts[:] = 0.0
     actor_ids = env._robot_actor_ids(env_ids)
     if env.ball_root_states is not None:
-        env.ball_root_states[:] = 0.0
-        if event == "ball_scene_reset":
-            ball_distance = env.cfg.skill_curriculum.ball_demo_spawn_distance_m
-            ball_height = env.cfg.scene.ball_radius_m
+        if event == "kick_ready":
+            env.ball_elapsed_steps[:] = 0
+            env.ball_success_latched[:] = False
+            env.ball_progress_latched[:] = 0.0
         else:
-            ball_distance = 0.0
-            ball_height = -1.0
-        env.ball_root_states[:, 0] = env.env_origins[:, 0] + ball_distance
-        env.ball_root_states[:, 1] = (
-            env.env_origins[:, 1]
-            + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
-        )
-        env.ball_root_states[:, 2] = ball_height
-        env.ball_root_states[:, 6] = 1.0
-        env.ball_start_x[:] = env.ball_root_states[:, 0]
-        env.ball_elapsed_steps[:] = 0
-        env.ball_success_latched[:] = False
-        actor_ids = torch.cat((
-            actor_ids,
-            actor_ids + env.scene_actor_slots["ball"],
-        ))
+            env.ball_root_states[:] = 0.0
+            if event == "ball_scene_reset":
+                ball_distance = env.cfg.skill_curriculum.ball_demo_spawn_distance_m
+                ball_height = env.cfg.scene.ball_radius_m
+            else:
+                ball_distance = 0.0
+                ball_height = -1.0
+            env.ball_root_states[:, 0] = env.env_origins[:, 0] + ball_distance
+            env.ball_root_states[:, 1] = (
+                env.env_origins[:, 1]
+                + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
+            )
+            env.ball_root_states[:, 2] = ball_height
+            env.ball_root_states[:, 6] = 1.0
+            env.ball_start_x[:] = env.ball_root_states[:, 0]
+            env.ball_elapsed_steps[:] = 0
+            env.ball_success_latched[:] = False
+            actor_ids = torch.cat((
+                actor_ids,
+                actor_ids + env.scene_actor_slots["ball"],
+            ))
     env_ids_int32 = actor_ids.to(dtype=torch.int32)
     env.gym.set_actor_root_state_tensor_indexed(
         env.sim,
@@ -638,6 +657,26 @@ def play(args, demo):
             command_name in ("ball_approach", "ball_kick"),
         )
         env.commands[0, :3] = torch.tensor(command, device=env.device)
+        if command_name == "ball_approach":
+            ball_relative = env._ball_relative_body()[0]
+            lateral_error = (
+                float(ball_relative[1].item())
+                - env.cfg.skill_curriculum.ball_demo_handoff_lateral_m
+            )
+            env.commands[0, 1] = max(
+                -0.04,
+                min(
+                    0.04,
+                    env.cfg.skill_curriculum.ball_demo_lateral_kp
+                    * lateral_error,
+                ),
+            )
+            if (
+                float(ball_relative[0].item()) <= 0.10
+                and abs(lateral_error)
+                > env.cfg.skill_curriculum.ball_demo_handoff_lateral_tolerance_m
+            ):
+                env.commands[0, 0] = 0.0
         env.skill_mode[:] = skill_mode
         env._apply_straight_heading_hold()
         env._apply_diagonal_heading_hold()
@@ -679,9 +718,15 @@ def play(args, demo):
 
         if demo.demo == "full_sequence" and command_name == "ball_approach":
             ball_relative = env._ball_relative_body()[0]
+            lateral_error = (
+                float(ball_relative[1].item())
+                - env.cfg.skill_curriculum.ball_demo_handoff_lateral_m
+            )
             approach_complete = (
-                float(ball_relative[0].item()) <= 0.080
-                and abs(float(ball_relative[1].item())) <= 0.10
+                float(ball_relative[0].item())
+                <= env.cfg.skill_curriculum.ball_demo_handoff_distance_m
+                and abs(lateral_error)
+                <= env.cfg.skill_curriculum.ball_demo_handoff_lateral_tolerance_m
             )
             if approach_complete:
                 print(

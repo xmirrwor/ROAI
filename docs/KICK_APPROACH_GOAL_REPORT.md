@@ -5,11 +5,16 @@
 The complete demonstration keeps the ball below the ground in every non-kick
 phase. The kick module starts with a stationary ball 0.45 m in front of the
 robot, uses the verified stage-7 straight-walk expert to approach it, and hands
-off to the stage-10 kick expert before contact. A red 0.26 m wide goal is drawn
-only during the approach and kick phases. Goal success requires the ball center
+off to the stage-10 kick expert before contact. At handoff, a deterministic
+near-ball ready pose clears the incoming gait phase without moving the ball.
+A red 0.26 m wide goal is drawn only during the approach and kick phases. Goal
+success requires the ball center
 to cross a line 0.15 m beyond its fixed start while remaining inside the goal.
 
 The policy interface remains 64 observations and 10 actions.
+
+Five consecutive full-sequence kick cycles passed after the ready-pose handoff,
+with 0.151-0.153 m ball progress and less than 0.002 m pre-kick ball movement.
 
 ## Training and selection
 
