@@ -7,6 +7,7 @@ import sys
 import time
 
 import isaacgym  # Must be imported before torch.
+import numpy as np
 import torch
 from isaacgym import gymtorch
 from isaacgym.torch_utils import euler_from_quat, quat_from_euler_xyz
@@ -70,7 +71,6 @@ OBSTACLE_SEQUENCE = (
 )
 
 BALL_SEQUENCE = (
-    ("prepare_ball", (0.0, 0.0, 0.0), 1.0, 0, "nominal"),
     ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal"),
 )
 
@@ -96,7 +96,7 @@ FULL_SEQUENCE = (
     ("backward_right", (-0.08, -0.08, 0.0), 4.0, 1, "nominal", "stage7", None, "diagonal_motion"),
     ("prepare_obstacle", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "obstacle_reset", "action_switch"),
     ("obstacle_crossing", (0.12, 0.0, 0.0), 7.0, 4, "nominal", "stage8", None, "obstacle_crossing"),
-    ("prepare_ball", (0.0, 0.0, 0.0), 1.0, 0, "nominal", "stage5", "ball_reset", "action_switch"),
+    ("ball_approach", (0.12, 0.0, 0.0), 10.0, 1, "nominal", "stage7", "ball_scene_reset", "action_switch"),
     ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal", "stage10", None, "ball_kick"),
     ("finish_stand", (0.0, 0.0, 0.0), 2.0, 0, "nominal", "stage5", "flat_reset", "action_switch"),
 )
@@ -276,17 +276,20 @@ def _set_demo_pose(env, event):
     env.gait_last_contacts[:] = False
     env.gait_first_contacts[:] = 0.0
     actor_ids = env._robot_actor_ids(env_ids)
-    if event == "ball_reset" and env.ball_root_states is not None:
+    if env.ball_root_states is not None:
         env.ball_root_states[:] = 0.0
-        env.ball_root_states[:, 0] = (
-            env.env_origins[:, 0]
-            + env.cfg.skill_curriculum.ball_kick_spawn_distance_m
-        )
+        if event == "ball_scene_reset":
+            ball_distance = env.cfg.skill_curriculum.ball_demo_spawn_distance_m
+            ball_height = env.cfg.scene.ball_radius_m
+        else:
+            ball_distance = 0.0
+            ball_height = -1.0
+        env.ball_root_states[:, 0] = env.env_origins[:, 0] + ball_distance
         env.ball_root_states[:, 1] = (
             env.env_origins[:, 1]
             + env.cfg.skill_curriculum.ball_spawn_lateral_center_m
         )
-        env.ball_root_states[:, 2] = env.cfg.scene.ball_radius_m
+        env.ball_root_states[:, 2] = ball_height
         env.ball_root_states[:, 6] = 1.0
         env.ball_start_x[:] = env.ball_root_states[:, 0]
         env.ball_elapsed_steps[:] = 0
@@ -321,13 +324,47 @@ def _set_demo_pose(env, event):
             [origin_x + 1.20, origin_y - 1.35, 0.70],
             [origin_x + 0.35, origin_y, 0.12],
         )
-    elif event == "ball_reset":
+    elif event == "ball_scene_reset":
         ball_x = float(env.ball_root_states[0, 0].item())
         ball_y = float(env.ball_root_states[0, 1].item())
         env.set_camera(
             [ball_x + 0.65, ball_y - 1.00, 0.52],
             [ball_x - 0.10, ball_y, 0.08],
         )
+
+
+def _draw_goal(env, visible):
+    if env.viewer is None:
+        return
+    env.gym.clear_lines(env.viewer)
+    if not visible or env.ball_root_states is None:
+        return
+    scene = env.cfg.scene
+    kick = env.cfg.skill_curriculum
+    front_x = float(env.ball_start_x[0].item()) + kick.ball_goal_distance_m
+    back_x = front_x + scene.goal_depth_m
+    center_y = float(env.env_origins[0, 1].item()) + kick.ball_spawn_lateral_center_m
+    left_y = center_y + scene.goal_width_m / 2.0
+    right_y = center_y - scene.goal_width_m / 2.0
+    top_z = scene.goal_height_m
+    lines = []
+    for x_pos in (front_x, back_x):
+        lines.extend((
+            ((x_pos, left_y, 0.0), (x_pos, left_y, top_z)),
+            ((x_pos, right_y, 0.0), (x_pos, right_y, top_z)),
+            ((x_pos, left_y, top_z), (x_pos, right_y, top_z)),
+        ))
+    lines.extend((
+        ((front_x, left_y, 0.0), (back_x, left_y, 0.0)),
+        ((front_x, right_y, 0.0), (back_x, right_y, 0.0)),
+        ((front_x, left_y, top_z), (back_x, left_y, top_z)),
+        ((front_x, right_y, top_z), (back_x, right_y, top_z)),
+    ))
+    vertices = np.asarray(lines, dtype=np.float32).reshape(-1, 3)
+    colors = np.tile(np.asarray(scene.goal_color, dtype=np.float32), (len(lines), 1))
+    env.gym.add_lines(
+        env.viewer, env.envs[0], len(lines), vertices, colors
+    )
 
 
 def _symmetric_policy_action(policy, obs, direct_action=None):
@@ -552,6 +589,20 @@ def play(args, demo):
             else env.cfg.skill_curriculum.nominal_body_height_m
         )
         if command_name != previous_command_name:
+            if (
+                previous_command_name == "ball_approach"
+                and command_name == "ball_kick"
+            ):
+                ball_relative = env._ball_relative_body()[0]
+                approach_progress = (
+                    env.ball_root_states[0, 0] - env.ball_start_x[0]
+                )
+                print(
+                    "Ball approach handoff; "
+                    f"relative_x_m={float(ball_relative[0].item()):.3f}; "
+                    f"relative_y_m={float(ball_relative[1].item()):.3f}; "
+                    f"pre_kick_ball_progress_m={float(approach_progress.item()):.3f}"
+                )
             print(
                 f"Demo phase: {command_name}; command={command}; "
                 f"expert={policy_key}"
@@ -582,6 +633,10 @@ def play(args, demo):
                 transition_step = 0
                 current_policy_key = policy_key
             previous_command_name = command_name
+        _draw_goal(
+            env,
+            command_name in ("ball_approach", "ball_kick"),
+        )
         env.commands[0, :3] = torch.tensor(command, device=env.device)
         env.skill_mode[:] = skill_mode
         env._apply_straight_heading_hold()
@@ -621,6 +676,20 @@ def play(args, demo):
                 transition_step += 1
             last_actions = actions.detach().clone()
         obs, _, _, dones, _ = env.step(actions.detach())
+
+        if demo.demo == "full_sequence" and command_name == "ball_approach":
+            ball_relative = env._ball_relative_body()[0]
+            approach_complete = (
+                float(ball_relative[0].item()) <= 0.080
+                and abs(float(ball_relative[1].item())) <= 0.10
+            )
+            if approach_complete:
+                print(
+                    "Ball approach completed; "
+                    f"relative_x_m={float(ball_relative[0].item()):.3f}; "
+                    f"relative_y_m={float(ball_relative[1].item()):.3f}"
+                )
+                step += sequence_steps[command_index] - cycle_step - 1
 
         if dones[0]:
             if (

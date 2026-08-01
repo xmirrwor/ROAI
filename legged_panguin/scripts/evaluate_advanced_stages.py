@@ -520,8 +520,8 @@ def _evaluate_ball(args, cfg, env, policy, checkpoint, iteration):
         "fall_rate_at_most_25pct": fall_rate <= 0.25,
     }
     if phase != "approach":
-        acceptance["mean_progress_reaches_phase_target"] = (
-            mean_progress >= ball_cfg.ball_stage10_success_distance_m
+        acceptance["mean_progress_reaches_goal_line"] = (
+            mean_progress >= ball_cfg.ball_goal_distance_m
         )
     result = {
         "run_label": cfg.run_label or f"ball_{phase}_{iteration}",
@@ -531,12 +531,19 @@ def _evaluate_ball(args, cfg, env, policy, checkpoint, iteration):
         "num_trials": count,
         "randomized": cfg.randomized,
         "success_rate": rate,
+        "goal_success_rate": rate if phase != "approach" else None,
         "fall_rate": fall_rate,
         "mean_max_ball_progress_m": mean_progress,
         "mean_max_ball_speed_mps": float(max_speed.mean().item()),
         "mean_closest_robot_ball_distance_m": float(closest_distance.mean().item()),
         "median_closest_robot_ball_distance_m": _percentile(closest_distance, 0.50),
         "median_closest_foot_ball_distance_m": _percentile(closest_foot_distance, 0.50),
+        "goal_line_distance_m": (
+            ball_cfg.ball_goal_distance_m if phase != "approach" else None
+        ),
+        "goal_width_m": (
+            env.cfg.scene.goal_width_m if phase != "approach" else None
+        ),
         "initial_left_foot_offset_xy_m": [
             float(initial_foot_offset[:, 0, axis].mean().item()) for axis in range(2)
         ],

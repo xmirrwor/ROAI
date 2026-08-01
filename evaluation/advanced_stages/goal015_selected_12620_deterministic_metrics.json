@@ -1,0 +1,36 @@
+{
+  "run_label": "goal015_selected_12620",
+  "protocol_name": "ball_kick_kick",
+  "checkpoint": "/root/miniducktraining/ROAI/logs/flat_miniduck/Aug01_17-22-14_stage10_close_ball_finetune_100/model_12620.pt",
+  "checkpoint_iteration": 12620,
+  "num_trials": 64,
+  "randomized": false,
+  "success_rate": 0.640625,
+  "goal_success_rate": 0.640625,
+  "fall_rate": 0.015625,
+  "mean_max_ball_progress_m": 0.22637930512428284,
+  "mean_max_ball_speed_mps": 0.16384321451187134,
+  "mean_closest_robot_ball_distance_m": 0.05355092138051987,
+  "median_closest_robot_ball_distance_m": 0.05913318693637848,
+  "median_closest_foot_ball_distance_m": 0.07191996276378632,
+  "goal_line_distance_m": 0.15,
+  "goal_width_m": 0.26,
+  "initial_left_foot_offset_xy_m": [
+    -0.043908730149269104,
+    0.1091093122959137
+  ],
+  "initial_right_foot_offset_xy_m": [
+    -0.04344765096902847,
+    -0.07206717878580093
+  ],
+  "acceptance": {
+    "success_rate_at_least_25pct": true,
+    "fall_rate_at_most_25pct": true,
+    "mean_progress_reaches_goal_line": true
+  },
+  "acceptance_passed": true,
+  "provenance": {
+    "aggregation": "raw per-step means and per-trial outcomes; no smoothing",
+    "failed_trials": "retained"
+  }
+}

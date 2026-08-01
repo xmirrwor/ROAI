@@ -1,0 +1,53 @@
+import ast
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _literal_assignment(path, name):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"Missing assignment: {name}")
+
+
+class BallGoalDemoTests(unittest.TestCase):
+    def test_full_sequence_approaches_before_kicking(self):
+        sequence = _literal_assignment(
+            ROOT / "legged_panguin" / "scripts" / "play_miniduck.py",
+            "FULL_SEQUENCE",
+        )
+        names = [item[0] for item in sequence]
+        self.assertLess(names.index("ball_approach"), names.index("ball_kick"))
+        approach = sequence[names.index("ball_approach")]
+        self.assertEqual(approach[5], "stage7")
+        self.assertEqual(approach[6], "ball_scene_reset")
+
+    def test_non_kick_scene_parks_ball_below_ground(self):
+        sources = (
+            ROOT / "legged_panguin" / "envs" / "miniduck" / "miniduck.py",
+            ROOT / "legged_panguin" / "scripts" / "play_miniduck.py",
+        )
+        for source in sources:
+            self.assertIn("ball_height = -1.0", source.read_text(encoding="utf-8"))
+
+    def test_goal_success_and_alignment_reward_are_present(self):
+        env_source = (
+            ROOT / "legged_panguin" / "envs" / "miniduck" / "miniduck.py"
+        ).read_text(encoding="utf-8")
+        config_source = (
+            ROOT / "legged_panguin" / "envs" / "miniduck" / "miniduck_config.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("cfg.ball_goal_distance_m", env_source)
+        self.assertIn("def _reward_ball_goal_alignment", env_source)
+        self.assertIn('"ball_goal_alignment"', config_source)
+        self.assertIn("goal_width_m", config_source)
+
+
+if __name__ == "__main__":
+    unittest.main()

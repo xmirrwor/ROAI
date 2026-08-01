@@ -1443,8 +1443,12 @@ class MiniDuck(LeggedRobot):
                     if cfg.ball_phase == "kick"
                     else cfg.ball_spawn_distance_m
                 )
+                ball_height = self.cfg.scene.ball_radius_m
             else:
-                spawn_distance = 4.0
+                # Keep the physical ball loaded but completely outside the
+                # scene until the kick module begins.
+                spawn_distance = 0.0
+                ball_height = -1.0
             self.ball_root_states[env_ids, 0] = self.env_origins[env_ids, 0] + spawn_distance
             self.ball_root_states[env_ids, 1] = (
                 self.env_origins[env_ids, 1] + cfg.ball_spawn_lateral_center_m
@@ -1455,7 +1459,7 @@ class MiniDuck(LeggedRobot):
                 (len(env_ids), 1),
                 device=self.device,
             ).squeeze(1)
-            self.ball_root_states[env_ids, 2] = self.cfg.scene.ball_radius_m
+            self.ball_root_states[env_ids, 2] = ball_height
             self.ball_root_states[env_ids, 6] = 1.0
             self.ball_start_x[env_ids] = self.ball_root_states[env_ids, 0]
             actor_ids = torch.cat((actor_ids, actor_ids + ball_slot))
@@ -2316,7 +2320,10 @@ class MiniDuck(LeggedRobot):
             return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         cfg = self.cfg.skill_curriculum
         progress = self.ball_root_states[:, 0] - self.ball_start_x
-        lateral = torch.abs(self.ball_root_states[:, 1] - self.env_origins[:, 1])
+        target_lateral = (
+            self.env_origins[:, 1] + cfg.ball_spawn_lateral_center_m
+        )
+        lateral = torch.abs(self.ball_root_states[:, 1] - target_lateral)
         relative = self._ball_relative_body()
         target = self.target_projected_gravity.expand_as(self.projected_gravity)
         upright = torch.sum(self.projected_gravity * target, dim=1) > 0.75
@@ -2327,7 +2334,14 @@ class MiniDuck(LeggedRobot):
                 & (torch.abs(relative[:, 1]) <= 0.10)
             )
         else:
-            task_reached = progress >= cfg.ball_stage10_success_distance_m
+            task_reached = progress >= cfg.ball_goal_distance_m
+            lateral_limit = min(
+                cfg.ball_target_lateral_tolerance_m,
+                cfg.ball_goal_half_width_m - self.cfg.scene.ball_radius_m,
+            )
+            return self.ball_task_active & task_reached & (
+                lateral <= lateral_limit
+            ) & upright
         return self.ball_task_active & task_reached & (
             lateral <= cfg.ball_target_lateral_tolerance_m
         ) & upright
@@ -2358,7 +2372,11 @@ class MiniDuck(LeggedRobot):
         if self.ball_root_states is None:
             return torch.zeros(self.num_envs, device=self.device)
         cfg = self.cfg.skill_curriculum
-        target = cfg.ball_stage9_success_distance_m if cfg.ball_phase == "approach" else cfg.ball_stage10_success_distance_m
+        target = (
+            cfg.ball_stage9_success_distance_m
+            if cfg.ball_phase == "approach"
+            else cfg.ball_goal_distance_m
+        )
         progress = torch.clamp((self.ball_root_states[:, 0] - self.ball_start_x) / target, 0.0, 1.5)
         return progress * self.ball_task_active.float()
 
@@ -2376,6 +2394,23 @@ class MiniDuck(LeggedRobot):
         proximity = torch.exp(-24.0 * nearest)
         swing = 0.5 + torch.clamp(foot_forward_velocity / 0.40, 0.0, 1.5)
         return proximity * swing * self.ball_task_active.float()
+
+    def _reward_ball_goal_alignment(self):
+        if self.ball_root_states is None:
+            return torch.zeros(self.num_envs, device=self.device)
+        cfg = self.cfg.skill_curriculum
+        if cfg.ball_phase == "approach":
+            return torch.zeros(self.num_envs, device=self.device)
+        progress = torch.clamp(
+            (self.ball_root_states[:, 0] - self.ball_start_x)
+            / cfg.ball_goal_distance_m,
+            0.0,
+            1.0,
+        )
+        target_y = self.env_origins[:, 1] + cfg.ball_spawn_lateral_center_m
+        lateral_error = self.ball_root_states[:, 1] - target_y
+        alignment = torch.exp(-40.0 * torch.square(lateral_error))
+        return progress * alignment * self.ball_task_active.float()
 
     def _reward_ball_success(self):
         return self._ball_success_mask().float()

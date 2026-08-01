@@ -67,6 +67,10 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         ball_mass_kg = 0.035
         ball_friction = 0.65
         ball_restitution = 0.20
+        goal_color = [0.92, 0.12, 0.12]
+        goal_width_m = 0.26
+        goal_height_m = 0.20
+        goal_depth_m = 0.10
 
     class init_state(LeggedRobotCfg.init_state):
         # PhysX evolutionary search result, cross-validated in MuJoCo:
@@ -203,6 +207,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "ball_forward_velocity",
             "ball_progress",
             "ball_contact",
+            "ball_goal_alignment",
             "ball_success",
             "ball_stability",
             "yaw_twist_without_step",
@@ -290,6 +295,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             ball_forward_velocity = 16.0
             ball_progress = 20.0
             ball_contact = 12.0
+            ball_goal_alignment = 24.0
             ball_success = 80.0
             ball_stability = 5.0
             lateral_axis_isolation = -0.55
@@ -433,13 +439,20 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         obstacle_lateral_tolerance_m = 0.15
         obstacle_heading_tolerance_deg = 22.0
         ball_spawn_distance_m = 0.30
+        ball_demo_spawn_distance_m = 0.45
         ball_spawn_lateral_center_m = -0.072
         ball_spawn_lateral_range_m = 0.025
-        ball_kick_spawn_distance_m = 0.03
+        ball_kick_spawn_distance_m = float(
+            os.environ.get("MINIDUCK_BALL_KICK_SPAWN_DISTANCE", "0.03")
+        )
         ball_approach_speed_mps = 0.10
         ball_contact_distance_m = 0.11
         ball_stage9_success_distance_m = 0.06
-        ball_stage10_success_distance_m = 0.22
+        ball_stage10_success_distance_m = 0.15
+        ball_goal_distance_m = float(
+            os.environ.get("MINIDUCK_BALL_GOAL_DISTANCE", "0.15")
+        )
+        ball_goal_half_width_m = 0.13
         ball_timeout_s = 6.0
         ball_target_lateral_tolerance_m = 0.18
         ball_phase = os.environ.get("MINIDUCK_BALL_PHASE", "kick")
