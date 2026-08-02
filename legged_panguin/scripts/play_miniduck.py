@@ -120,7 +120,10 @@ def play(args):
     env.common_step_counter = checkpoint_iteration * runner.num_steps_per_env
     policy = runner.get_inference_policy(device=env.device)
     loaded_checkpoint = initial_checkpoint
+    single_leg_task = args.task == "miniduck_single_leg_physics"
     print(f"Visualizing one MiniDuck from {loaded_checkpoint}")
+    if single_leg_task:
+        print("Single-leg physics task: preserving the trained support command.")
 
     obs = env.get_observations()
     command_steps = max(1, int(5.0 / env.dt))
@@ -128,15 +131,19 @@ def play(args):
     step = 0
 
     while True:
-        command_index = (step // command_steps) % len(COMMANDS)
-        command_name, command = COMMANDS[command_index]
-        env.commands[0, :3] = torch.tensor(command, device=env.device)
+        if single_leg_task:
+            command_name = "left_support"
+            command = env.commands[0, :3].detach().clone()
+        else:
+            command_index = (step // command_steps) % len(COMMANDS)
+            command_name, command = COMMANDS[command_index]
+            env.commands[0, :3] = torch.tensor(command, device=env.device)
 
         with torch.no_grad():
             actions = policy(obs.detach())
         obs, _, _, dones, _ = env.step(actions.detach())
 
-        if dones[0]:
+        if dones[0] and not single_leg_task:
             env.commands[0, :3] = torch.tensor(command, device=env.device)
 
         robot_position = env.root_states[0, :3].detach().cpu().tolist()
