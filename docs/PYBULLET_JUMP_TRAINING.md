@@ -120,3 +120,31 @@ times model weight.
 PyBullet uses `pybullet_jump/miniduck_pybullet.urdf`, which preserves the
 original visuals, mass, inertia, and joints while replacing the two STL foot
 collision meshes with stable primitive boxes. The Isaac Gym URDF is unchanged.
+
+## Continuous jump model
+
+Continuous jumping is a separate policy and never overwrites the preserved
+400-iteration single-jump model. Train two jumps first:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHON_BIN=python bash run_pybullet_continuous_jump.sh \
+  --base checkpoints/pybullet_jump_best_v6.json \
+  --jumps 2 --iterations 300 --population 128 \
+  --output checkpoints/pybullet_continuous_jump_2.json
+```
+
+After the log reaches `completed=2/2`, extend the saved controller to three
+jumps without resetting simulation state:
+
+```bash
+PYTHONUNBUFFERED=1 PYTHON_BIN=python bash run_pybullet_continuous_jump.sh \
+  --base checkpoints/pybullet_continuous_jump_2.json \
+  --jumps 3 --iterations 400 --population 128 \
+  --output checkpoints/pybullet_continuous_jump_3.json
+```
+
+The continuous policy shares the 16 single-jump motion parameters and adds a
+trainable inter-jump settling pause. Completion count dominates the score;
+after every requested jump lands safely, the minimum flight COM peak across
+all jumps is optimized so a single high first jump cannot mask weaker later
+jumps.
