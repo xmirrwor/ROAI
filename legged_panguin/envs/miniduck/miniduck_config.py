@@ -11,6 +11,8 @@ from legged_panguin.envs.base.legged_robot_config import LeggedRobotCfg, LeggedR
 
 JOINT_MIRROR_PERMUTATION = [5, 6, 7, 8, 9, 0, 1, 2, 3, 4]
 JOINT_MIRROR_SIGNS = [-1.0, -1.0, -1.0, 1.0, 1.0] * 2
+RACE_MOTION = os.environ.get("MINIDUCK_RACE_MOTION", "").strip().lower()
+RACE_LATERAL = RACE_MOTION == "lateral"
 
 
 def _symmetry_layout():
@@ -175,6 +177,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "moving_without_step",
             "lateral_yaw_rate",
             "lateral_heading_error",
+            "lateral_race_speed",
             "sagittal_heading_error",
             "sagittal_lateral_displacement",
             "sagittal_velocity_tracking",
@@ -239,18 +242,18 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             single_support = 0.9
             double_support = -0.18
             no_contact = -8.0
-            yaw_alternating_contact = 2.4
-            yaw_contact_switch = 1.8
-            yaw_twist_without_step = -28.0
+            yaw_alternating_contact = 0.0 if RACE_LATERAL else 2.4
+            yaw_contact_switch = 0.0 if RACE_LATERAL else 1.8
+            yaw_twist_without_step = 0.0 if RACE_LATERAL else -28.0
             sagittal_progress = 0.8
-            lateral_progress = 0.7
-            yaw_progress = 0.7
+            lateral_progress = 2.0 if RACE_LATERAL else 0.7
+            yaw_progress = 0.0 if RACE_LATERAL else 0.7
             sagittal_step_progress = 2.3
-            lateral_step_progress = 2.2
-            yaw_step_progress = 2.4
+            lateral_step_progress = 3.2 if RACE_LATERAL else 2.2
+            yaw_step_progress = 0.0 if RACE_LATERAL else 2.4
             sagittal_lag = -1.2
-            lateral_lag = -1.5
-            yaw_lag = -1.6
+            lateral_lag = -3.0 if RACE_LATERAL else -1.5
+            yaw_lag = 0.0 if RACE_LATERAL else -1.6
             command_stall = -0.8
             support_contact = 1.5
             no_fly = 0.75
@@ -263,10 +266,10 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             sagittal_axis_isolation = -0.40
             # Unlike axis isolation, these terms penalize accumulated drift
             # over a command segment and directly match the 2 m race metric.
-            sagittal_heading_error = -8.0
-            sagittal_lateral_displacement = -10.0
-            straight_yaw_rate = -3.0
-            sagittal_velocity_tracking = 16.0
+            sagittal_heading_error = 0.0 if RACE_LATERAL else -8.0
+            sagittal_lateral_displacement = 0.0 if RACE_LATERAL else -10.0
+            straight_yaw_rate = 0.0 if RACE_LATERAL else -3.0
+            sagittal_velocity_tracking = 0.0 if RACE_LATERAL else 16.0
             action_switch_velocity_progress = 20.0
             action_switch_velocity_lag = -8.0
             skill_height_tracking = 6.0
@@ -298,10 +301,11 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             ball_goal_alignment = 24.0
             ball_success = 80.0
             ball_stability = 5.0
-            lateral_axis_isolation = -0.55
-            lateral_yaw_rate = -1.6
-            lateral_heading_error = -2.2
-            yaw_axis_isolation = -0.45
+            lateral_axis_isolation = -0.75 if RACE_LATERAL else -0.55
+            lateral_yaw_rate = -2.4 if RACE_LATERAL else -1.6
+            lateral_heading_error = -3.5 if RACE_LATERAL else -2.2
+            lateral_race_speed = 12.0 if RACE_LATERAL else 0.0
+            yaw_axis_isolation = 0.0 if RACE_LATERAL else -0.45
             torques = -1.5e-4
             dof_acc = -2.0e-7
             action_rate = -0.16
@@ -311,6 +315,17 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             stand_still = -0.15
 
     class commands(LeggedRobotCfg.commands):
+        race_motion = RACE_MOTION
+        race_lateral_speed_range = [
+            float(os.environ.get("MINIDUCK_RACE_LATERAL_MIN_SPEED", "0.26")),
+            float(os.environ.get("MINIDUCK_RACE_LATERAL_MAX_SPEED", "0.32")),
+        ]
+        race_lateral_target_speed = float(
+            os.environ.get("MINIDUCK_RACE_LATERAL_TARGET_SPEED", "0.34")
+        )
+        race_positive_direction_prob = float(
+            os.environ.get("MINIDUCK_RACE_POSITIVE_DIRECTION_PROB", "0.5")
+        )
         heading_command = False
         # All skill segments are two seconds, including the emergency-stop hold.
         resampling_time = 2.0

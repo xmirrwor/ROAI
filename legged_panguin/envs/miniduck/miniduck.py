@@ -448,6 +448,8 @@ class MiniDuck(LeggedRobot):
         )
 
     def _apply_straight_heading_hold(self):
+        if self.cfg.commands.race_motion == "lateral":
+            return
         if not self._stage_is("emergency_stop_stand", "squat", "action_switch"):
             return
         active = self.line_reference_active
@@ -501,6 +503,25 @@ class MiniDuck(LeggedRobot):
             (torch.abs(self.commands[:, 0]) >= self._current_min_abs("lin_vel_x"))
             & (torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y"))
         )
+        if not torch.any(active):
+            return
+        _, _, yaw = euler_from_quat(self.base_quat)
+        heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
+        cfg = self.cfg.skill_curriculum
+        correction = (
+            -cfg.heading_hold_kp * heading_error
+            - cfg.heading_hold_kd * self.base_ang_vel[:, 2]
+        )
+        self.commands[active, 2] = torch.clamp(
+            correction[active],
+            -cfg.heading_hold_max_yaw_rate,
+            cfg.heading_hold_max_yaw_rate,
+        )
+
+    def _apply_lateral_race_heading_hold(self):
+        if self.cfg.commands.race_motion != "lateral":
+            return
+        active = self._pure_lateral_command_mask().bool()
         if not torch.any(active):
             return
         _, _, yaw = euler_from_quat(self.base_quat)
@@ -995,6 +1016,35 @@ class MiniDuck(LeggedRobot):
             return
 
         self._update_command_range_schedule()
+        if self.cfg.commands.race_motion == "lateral":
+            self.commands[env_ids, :3] = 0.0
+            speed_range = self.cfg.commands.race_lateral_speed_range
+            speed = torch_rand_float(
+                speed_range[0],
+                speed_range[1],
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze(1)
+            positive = torch.rand(len(env_ids), device=self.device) < (
+                self.cfg.commands.race_positive_direction_prob
+            )
+            self.commands[env_ids, 1] = torch.where(positive, speed, -speed)
+            new_reference = ~self.line_reference_active[env_ids]
+            if torch.any(new_reference):
+                reference_ids = env_ids[new_reference]
+                _, _, yaw = euler_from_quat(self.base_quat[reference_ids])
+                self.command_heading[reference_ids] = yaw
+                self.command_start_xy[reference_ids] = self.root_states[
+                    reference_ids, :2
+                ]
+            self.line_reference_active[env_ids] = True
+            self.skill_mode[env_ids] = self.SKILL_LOCOMOTION
+            self._schedule_skill_height(
+                env_ids, self.cfg.skill_curriculum.nominal_body_height_m
+            )
+            self.emergency_probe_active[env_ids] = False
+            return
+
         action_stage = self._current_action_stage()
         if action_stage is not None and action_stage.key == "emergency_stop_stand":
             # A probe is always followed by a zero-command segment.  This makes
@@ -1735,6 +1785,8 @@ class MiniDuck(LeggedRobot):
         )
 
     def _pure_yaw_command_mask(self):
+        if self.cfg.commands.race_motion == "lateral":
+            return torch.zeros(self.num_envs, device=self.device)
         yaw_active = torch.abs(self.commands[:, 2]) >= self._current_min_abs("ang_vel_yaw")
         low_translation = torch.norm(self.commands[:, :2], dim=1) < 0.05
         return (yaw_active & low_translation).float()
@@ -1742,6 +1794,8 @@ class MiniDuck(LeggedRobot):
     def _pure_lateral_command_mask(self):
         lateral_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
         low_sagittal = torch.abs(self.commands[:, 0]) < 0.04
+        if self.cfg.commands.race_motion == "lateral":
+            return (lateral_active & low_sagittal).float()
         low_yaw = torch.abs(self.commands[:, 2]) < 0.08
         return (lateral_active & low_sagittal & low_yaw).float()
 
@@ -1974,6 +2028,7 @@ class MiniDuck(LeggedRobot):
         self._update_skill_targets()
         self._apply_straight_heading_hold()
         self._apply_diagonal_heading_hold()
+        self._apply_lateral_race_heading_hold()
         self._update_recovery_state()
         self.obstacle_elapsed_steps += self.obstacle_task_active.long()
         self.ball_elapsed_steps += self.ball_task_active.long()
@@ -2675,6 +2730,19 @@ class MiniDuck(LeggedRobot):
         _, _, yaw = euler_from_quat(self.base_quat)
         heading_error = torch_wrap_to_pi_minuspi(yaw - self.command_heading)
         return torch.clamp(torch.square(heading_error / 0.35), max=4.0) * self._pure_lateral_command_mask()
+
+    def _reward_lateral_race_speed(self):
+        if self.cfg.commands.race_motion != "lateral":
+            return torch.zeros(self.num_envs, device=self.device)
+        signed_speed = torch.sign(self.commands[:, 1]) * self.base_lin_vel[:, 1]
+        normalized_speed = signed_speed / max(
+            self.cfg.commands.race_lateral_target_speed,
+            1.0e-4,
+        )
+        return (
+            torch.clamp(normalized_speed, min=0.0, max=1.25)
+            * self._pure_lateral_command_mask()
+        )
 
     def _reward_yaw_axis_isolation(self):
         yaw_cmd = torch.abs(self.commands[:, 2]) > self._current_min_abs("ang_vel_yaw")
