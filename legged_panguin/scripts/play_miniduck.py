@@ -74,6 +74,12 @@ BALL_SEQUENCE = (
     ("ball_kick", (0.10, 0.0, 0.0), 6.0, 5, "nominal"),
 )
 
+RACE_2M_SEQUENCE = (
+    ("race_ready", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "primary", "race_reset", "action_switch"),
+    ("race_2m", (0.0, 0.26, 0.0), 8.0, 1, "nominal", "primary", None, "action_switch"),
+    ("race_finish", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "primary", None, "action_switch"),
+)
+
 # name, command, seconds, skill, height, expert, event, effective stage
 FULL_SEQUENCE = (
     ("stand", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "stage5", "flat_reset", "action_switch"),
@@ -116,6 +122,7 @@ def _demo_args():
             "obstacle_crossing",
             "ball_kick",
             "full_sequence",
+            "race_2m",
         ),
         default="emergency_stop",
     )
@@ -345,6 +352,13 @@ def _set_demo_pose(env, event):
             [origin_x + 1.20, origin_y - 1.35, 0.70],
             [origin_x + 0.35, origin_y, 0.12],
         )
+    elif event == "race_reset":
+        origin_x = float(env.env_origins[0, 0].item())
+        origin_y = float(env.env_origins[0, 1].item())
+        env.set_camera(
+            [origin_x + 1.75, origin_y + 1.00, 0.90],
+            [origin_x, origin_y + 1.00, 0.10],
+        )
     elif event == "ball_scene_reset":
         ball_x = float(env.ball_root_states[0, 0].item())
         ball_y = float(env.ball_root_states[0, 1].item())
@@ -385,6 +399,38 @@ def _draw_goal(env, visible):
     colors = np.tile(np.asarray(scene.goal_color, dtype=np.float32), (len(lines), 1))
     env.gym.add_lines(
         env.viewer, env.envs[0], len(lines), vertices, colors
+    )
+
+
+def _draw_race_course(env):
+    if env.viewer is None:
+        return
+    env.gym.clear_lines(env.viewer)
+    start_x = float(env.command_start_xy[0, 0].item())
+    start_y = float(env.command_start_xy[0, 1].item())
+    finish_y = start_y + 2.0
+    z = 0.012
+    half_width = 0.30
+    lines = [
+        ((start_x - half_width, start_y, z), (start_x + half_width, start_y, z)),
+        ((start_x - half_width, finish_y, z), (start_x + half_width, finish_y, z)),
+        ((start_x - half_width, start_y, z), (start_x - half_width, finish_y, z)),
+        ((start_x + half_width, start_y, z), (start_x + half_width, finish_y, z)),
+    ]
+    colors = [
+        (0.10, 0.45, 1.00),
+        (0.10, 1.00, 0.30),
+        (0.95, 0.95, 0.95),
+        (0.95, 0.95, 0.95),
+    ]
+    for distance in (0.5, 1.0, 1.5):
+        y = start_y + distance
+        lines.append(((start_x - 0.10, y, z), (start_x + 0.10, y, z)))
+        colors.append((0.65, 0.65, 0.65))
+    vertices = np.asarray(lines, dtype=np.float32).reshape(-1, 3)
+    line_colors = np.asarray(colors, dtype=np.float32)
+    env.gym.add_lines(
+        env.viewer, env.envs[0], len(lines), vertices, line_colors
     )
 
 
@@ -463,6 +509,11 @@ def play(args, demo):
         env_cfg.terrain.mesh_type = "plane"
         env_cfg.terrain.obstacle_course = False
         env_cfg.scene.ball_enabled = True
+    elif demo.demo == "race_2m":
+        env_cfg.skill_curriculum.forced_stage = 0
+        env_cfg.commands.race_motion = "lateral"
+        env_cfg.commands.race_lateral_speed_range = [0.26, 0.26]
+        env_cfg.commands.race_positive_direction_prob = 1.0
     if demo.demo == "full_sequence":
         env_cfg.env.episode_length_s = 200.0
     env_cfg.viewer.pos = [1.20, -1.20, 0.65] if demo.fixed_camera else [0.45, -0.45, 0.35]
@@ -559,9 +610,11 @@ def play(args, demo):
         base_sequence = BALL_SEQUENCE
     elif demo.demo == "full_sequence":
         sequence = FULL_SEQUENCE
+    elif demo.demo == "race_2m":
+        sequence = RACE_2M_SEQUENCE
     else:
         base_sequence = (("fall_recovery", (0.0, 0.0, 0.0), 1000.0, 3, "nominal"),)
-    if demo.demo != "full_sequence":
+    if demo.demo not in ("full_sequence", "race_2m"):
         if demo.demo == "diagonal_motion":
             stage_key = "diagonal_motion"
         elif demo.demo == "fall_recovery":
@@ -663,10 +716,13 @@ def play(args, demo):
                 transition_step = 0
                 current_policy_key = policy_key
             previous_command_name = command_name
-        _draw_goal(
-            env,
-            command_name in ("ball_approach", "ball_kick"),
-        )
+        if demo.demo == "race_2m":
+            _draw_race_course(env)
+        else:
+            _draw_goal(
+                env,
+                command_name in ("ball_approach", "ball_kick"),
+            )
         env.commands[0, :3] = torch.tensor(command, device=env.device)
         if command_name == "ball_approach":
             ball_relative = env._ball_relative_body()[0]
