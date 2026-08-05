@@ -28,14 +28,19 @@ def _race_args():
     parser.add_argument("--direction_sign", type=int, choices=(-1, 1), default=1)
     parser.add_argument("--distance_m", type=float, default=2.0)
     parser.add_argument("--timeout_s", type=float, default=30.0)
-    parser.add_argument("--max_cross_track_m", type=float, default=0.10)
-    parser.add_argument("--lateral_line_kp", type=float, default=1.00)
+    parser.add_argument("--max_cross_track_m", type=float, default=0.07)
+    parser.add_argument("--max_mean_abs_cross_track_m", type=float, default=0.03)
+    parser.add_argument("--max_final_cross_track_m", type=float, default=0.04)
+    parser.add_argument("--lateral_line_kp", type=float, default=1.10)
     parser.add_argument("--lateral_line_kd", type=float, default=0.25)
+    parser.add_argument("--lateral_line_ki", type=float, default=0.25)
+    parser.add_argument("--lateral_line_integral_limit", type=float, default=0.08)
     parser.add_argument("--lateral_line_max_mps", type=float, default=0.12)
     parser.add_argument("--checkpoint_path", required=True)
     parser.add_argument("--output_dir", default="evaluation/race_2m")
     parser.add_argument("--run_label", default=None)
     parser.add_argument("--randomized", action="store_true")
+    parser.add_argument("--geometry_only", action="store_true")
     known, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0], *remaining]
     return known
@@ -65,6 +70,34 @@ def _percentile(values, quantile=0.95):
     return float(torch.quantile(values, quantile).item())
 
 
+def _print_geometry_diagnostic(env):
+    env.gym.refresh_actor_root_state_tensor(env.sim)
+    env.gym.refresh_rigid_body_state_tensor(env.sim)
+    env_origin = env.env_origins[0, :2]
+    root_xy = env.root_states[0, :2]
+    feet_xy = env.rigid_body_state[0, env.feet_indices, :2]
+    feet_center_xy = torch.mean(feet_xy, dim=0)
+    report = {
+        "env_origin_xy_m": env_origin.detach().cpu().tolist(),
+        "root_xy_world_m": root_xy.detach().cpu().tolist(),
+        "root_xy_env_local_m": (root_xy - env_origin).detach().cpu().tolist(),
+        "command_start_xy_world_m": env.command_start_xy[0].detach().cpu().tolist(),
+        "feet_indices": env.feet_indices.detach().cpu().tolist(),
+        "feet_xy_world_m": feet_xy.detach().cpu().tolist(),
+        "feet_center_xy_world_m": feet_center_xy.detach().cpu().tolist(),
+        "feet_center_minus_root_xy_m": (
+            feet_center_xy - root_xy
+        ).detach().cpu().tolist(),
+        "current_drawn_center_if_vertices_are_env_local_m": (
+            env.command_start_xy[0] + env_origin
+        ).detach().cpu().tolist(),
+        "rigid_body_xy_world_m": env.rigid_body_state[
+            0, :, :2
+        ].detach().cpu().tolist(),
+    }
+    print(json.dumps(report, indent=2))
+
+
 def evaluate(args, race):
     if race.command_speed_mps <= 0.0:
         raise ValueError("command_speed_mps must be positive")
@@ -91,6 +124,10 @@ def evaluate(args, race):
         env_cfg.commands.race_motion = "lateral"
         env_cfg.commands.race_line_hold_kp = race.lateral_line_kp
         env_cfg.commands.race_line_hold_kd = race.lateral_line_kd
+        env_cfg.commands.race_line_hold_ki = race.lateral_line_ki
+        env_cfg.commands.race_line_hold_integral_limit_m_s = (
+            race.lateral_line_integral_limit
+        )
         env_cfg.commands.race_line_hold_max_sagittal_mps = (
             race.lateral_line_max_mps
         )
@@ -116,6 +153,9 @@ def evaluate(args, race):
 
     train_cfg.runner.resume = False
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    if race.geometry_only:
+        _print_geometry_diagnostic(env)
+        return
     runner, _ = task_registry.make_alg_runner(
         env=env,
         name=args.task,
@@ -164,6 +204,9 @@ def evaluate(args, race):
     final_cross_track = torch.zeros(count, device=env.device)
     final_heading_error = torch.zeros(count, device=env.device)
     max_cross_track = torch.zeros(count, device=env.device)
+    sum_abs_cross_track = torch.zeros(count, device=env.device)
+    sum_signed_cross_track = torch.zeros(count, device=env.device)
+    cross_track_samples = torch.zeros(count, device=env.device)
     max_tilt = torch.zeros(count, device=env.device)
     last_valid_xy = start_xy.clone()
     path_length = torch.zeros(count, device=env.device)
@@ -178,7 +221,7 @@ def evaluate(args, race):
         if race.motion == "forward":
             env._apply_straight_heading_hold()
         elif race.motion == "lateral":
-            env._apply_lateral_race_heading_hold()
+            env._apply_lateral_race_heading_hold(update_integral=False)
         else:
             yaw = _yaw_xyzw(env.root_states[:, 3:7])
             heading_error = torch.atan2(
@@ -223,6 +266,13 @@ def evaluate(args, race):
         delta = last_valid_xy - start_xy
         progress = torch.sum(delta * path_unit, dim=1)
         cross_track = torch.sum(delta * perpendicular, dim=1)
+        sum_abs_cross_track += torch.where(
+            active, torch.abs(cross_track), torch.zeros_like(cross_track)
+        )
+        sum_signed_cross_track += torch.where(
+            active, cross_track, torch.zeros_like(cross_track)
+        )
+        cross_track_samples += active.float()
         yaw = _yaw_xyzw(state[:, 3:7])
         previous_yaw = _yaw_xyzw(previous_state[:, 3:7])
         yaw = torch.where(done_now, previous_yaw, yaw)
@@ -317,6 +367,12 @@ def evaluate(args, race):
         dim=0,
     ).values
     path_efficiency = net_distance / torch.clamp(path_length, min=1.0e-6)
+    mean_abs_cross_track = sum_abs_cross_track / torch.clamp(
+        cross_track_samples, min=1.0
+    )
+    mean_signed_cross_track = sum_signed_cross_track / torch.clamp(
+        cross_track_samples, min=1.0
+    )
 
     completed = int(finished.sum().item())
     completion_rate = completed / count
@@ -344,6 +400,14 @@ def evaluate(args, race):
             max_cross_track
         )
         <= race.max_cross_track_m,
+        "p95_mean_abs_cross_track_at_most_limit": _percentile(
+            mean_abs_cross_track
+        )
+        <= race.max_mean_abs_cross_track_m,
+        "p95_final_abs_cross_track_at_most_limit": _percentile(
+            torch.abs(final_cross_track)
+        )
+        <= race.max_final_cross_track_m,
         "p05_path_efficiency_at_least_0p90": _percentile(
             path_efficiency,
             0.05,
@@ -365,8 +429,12 @@ def evaluate(args, race):
         "distance_m": race.distance_m,
         "timeout_s": race.timeout_s,
         "max_cross_track_m": race.max_cross_track_m,
+        "max_mean_abs_cross_track_m": race.max_mean_abs_cross_track_m,
+        "max_final_cross_track_m": race.max_final_cross_track_m,
         "lateral_line_kp": race.lateral_line_kp,
         "lateral_line_kd": race.lateral_line_kd,
+        "lateral_line_ki": race.lateral_line_ki,
+        "lateral_line_integral_limit": race.lateral_line_integral_limit,
         "lateral_line_max_mps": race.lateral_line_max_mps,
         "command_speed_mps": race.command_speed_mps,
         "direction_sign": race.direction_sign,
@@ -391,6 +459,14 @@ def evaluate(args, race):
         "mean_command_axis_progress_m": float(final_progress.mean().item()),
         "mean_command_axis_max_cross_track_m": mean_cross,
         "p95_command_axis_max_cross_track_m": _percentile(max_cross_track),
+        "mean_abs_cross_track_m": float(mean_abs_cross_track.mean().item()),
+        "p95_mean_abs_cross_track_m": _percentile(mean_abs_cross_track),
+        "mean_signed_cross_track_m": float(
+            mean_signed_cross_track.mean().item()
+        ),
+        "p95_final_abs_cross_track_m": _percentile(
+            torch.abs(final_cross_track)
+        ),
         "p95_heading_error_deg": math.degrees(
             _percentile(torch.abs(final_heading_error))
         ),

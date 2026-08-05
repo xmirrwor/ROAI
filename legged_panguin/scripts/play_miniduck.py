@@ -337,6 +337,7 @@ def _set_demo_pose(env, event):
     _, _, heading = euler_from_quat(env.root_states[:, 3:7])
     env.command_heading[:] = heading
     env.command_start_xy[:] = env.root_states[:, :2]
+    env.race_line_integral[:] = 0.0
     env.line_reference_active[:] = True
     if event == "obstacle_reset":
         obstacle_x = float(env.obstacle_world_x[0].item())
@@ -353,11 +354,15 @@ def _set_demo_pose(env, event):
             [origin_x + 0.35, origin_y, 0.12],
         )
     elif event == "race_reset":
-        origin_x = float(env.env_origins[0, 0].item())
-        origin_y = float(env.env_origins[0, 1].item())
+        start = env.command_start_xy[0].detach().cpu().numpy()
+        heading = float(env.command_heading[0].item())
+        side = np.asarray((np.cos(heading), np.sin(heading)), dtype=np.float32)
+        path = np.asarray((-np.sin(heading), np.cos(heading)), dtype=np.float32)
+        course_center = start + path
+        camera_xy = course_center + 0.55 * side
         env.set_camera(
-            [origin_x + 1.75, origin_y + 1.00, 0.90],
-            [origin_x, origin_y + 1.00, 0.10],
+            [float(camera_xy[0]), float(camera_xy[1]), 1.45],
+            [float(course_center[0]), float(course_center[1]), 0.04],
         )
     elif event == "ball_scene_reset":
         ball_x = float(env.ball_root_states[0, 0].item())
@@ -406,17 +411,21 @@ def _draw_race_course(env):
     if env.viewer is None:
         return
     env.gym.clear_lines(env.viewer)
-    start_x = float(env.command_start_xy[0, 0].item())
-    start_y = float(env.command_start_xy[0, 1].item())
-    finish_y = start_y + 2.0
+    start = env.command_start_xy[0].detach().cpu().numpy()
+    heading = float(env.command_heading[0].item())
+    side = np.asarray((np.cos(heading), np.sin(heading)), dtype=np.float32)
+    path = np.asarray((-np.sin(heading), np.cos(heading)), dtype=np.float32)
+    finish = start + 2.0 * path
     z = 0.012
     half_width = 0.30
     lines = [
-        ((start_x - half_width, start_y, z), (start_x + half_width, start_y, z)),
-        ((start_x - half_width, finish_y, z), (start_x + half_width, finish_y, z)),
-        ((start_x - half_width, start_y, z), (start_x - half_width, finish_y, z)),
-        ((start_x + half_width, start_y, z), (start_x + half_width, finish_y, z)),
-        ((start_x, start_y, z), (start_x, finish_y, z)),
+        ((*tuple(start - half_width * side), z), (*tuple(start + half_width * side), z)),
+        ((*tuple(finish - half_width * side), z), (*tuple(finish + half_width * side), z)),
+        ((*tuple(start - half_width * side), z), (*tuple(finish - half_width * side), z)),
+        ((*tuple(start + half_width * side), z), (*tuple(finish + half_width * side), z)),
+        ((*tuple(start), z), (*tuple(finish), z)),
+        ((*tuple(start - 0.008 * side), z), (*tuple(finish - 0.008 * side), z)),
+        ((*tuple(start + 0.008 * side), z), (*tuple(finish + 0.008 * side), z)),
     ]
     colors = [
         (0.10, 0.45, 1.00),
@@ -424,10 +433,15 @@ def _draw_race_course(env):
         (0.95, 0.95, 0.95),
         (0.95, 0.95, 0.95),
         (1.00, 0.82, 0.10),
+        (1.00, 0.82, 0.10),
+        (1.00, 0.82, 0.10),
     ]
     for distance in (0.5, 1.0, 1.5):
-        y = start_y + distance
-        lines.append(((start_x - 0.10, y, z), (start_x + 0.10, y, z)))
+        tick = start + distance * path
+        lines.append((
+            (*tuple(tick - 0.10 * side), z),
+            (*tuple(tick + 0.10 * side), z),
+        ))
         colors.append((0.65, 0.65, 0.65))
     vertices = np.asarray(lines, dtype=np.float32).reshape(-1, 3)
     line_colors = np.asarray(colors, dtype=np.float32)
@@ -749,6 +763,7 @@ def play(args, demo):
         env.skill_mode[:] = skill_mode
         env._apply_straight_heading_hold()
         env._apply_diagonal_heading_hold()
+        env._apply_lateral_race_heading_hold(update_integral=False)
         obs[:, 9:12] = env._command_observation()
         obs[:, 62:64] = env._skill_observation()
 
@@ -784,6 +799,25 @@ def play(args, demo):
                 transition_step += 1
             last_actions = actions.detach().clone()
         obs, _, _, dones, _ = env.step(actions.detach())
+
+        if (
+            demo.demo == "race_2m"
+            and command_name == "race_2m"
+            and cycle_step % max(1, round(0.5 / env.dt)) == 0
+        ):
+            heading = env.command_heading[0]
+            side = torch.stack((torch.cos(heading), torch.sin(heading)))
+            root_delta = env.root_states[0, :2] - env.command_start_xy[0]
+            feet_center = torch.mean(
+                env.rigid_body_state[0, env.feet_indices, :2], dim=0
+            )
+            feet_delta = feet_center - env.command_start_xy[0]
+            print(
+                "Race centerline telemetry: "
+                f"time_s={cycle_step * env.dt:.2f}; "
+                f"root_cross_track_m={float(torch.dot(root_delta, side).item()):.4f}; "
+                f"feet_center_cross_track_m={float(torch.dot(feet_delta, side).item()):.4f}"
+            )
 
         if demo.demo == "full_sequence" and command_name == "ball_approach":
             ball_relative = env._ball_relative_body()[0]

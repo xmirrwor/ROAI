@@ -178,6 +178,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "lateral_yaw_rate",
             "lateral_heading_error",
             "lateral_race_speed",
+            "lateral_race_centered_speed",
             "lateral_race_path_error",
             "sagittal_heading_error",
             "sagittal_lateral_displacement",
@@ -306,7 +307,16 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             lateral_yaw_rate = -2.4 if RACE_LATERAL else -1.6
             lateral_heading_error = -3.5 if RACE_LATERAL else -2.2
             lateral_race_speed = 12.0 if RACE_LATERAL else 0.0
-            lateral_race_path_error = -6.0 if RACE_LATERAL else 0.0
+            lateral_race_centered_speed = (
+                float(os.environ.get("MINIDUCK_RACE_CENTERED_SPEED_SCALE", "10.0"))
+                if RACE_LATERAL
+                else 0.0
+            )
+            lateral_race_path_error = (
+                float(os.environ.get("MINIDUCK_RACE_PATH_ERROR_SCALE", "-12.0"))
+                if RACE_LATERAL
+                else 0.0
+            )
             yaw_axis_isolation = 0.0 if RACE_LATERAL else -0.45
             torques = -1.5e-4
             dof_acc = -2.0e-7
@@ -325,11 +335,20 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         race_lateral_target_speed = float(
             os.environ.get("MINIDUCK_RACE_LATERAL_TARGET_SPEED", "0.34")
         )
+        race_centerline_width_m = float(
+            os.environ.get("MINIDUCK_RACE_CENTERLINE_WIDTH_M", "0.03")
+        )
         race_line_hold_kp = float(
-            os.environ.get("MINIDUCK_RACE_LINE_HOLD_KP", "1.00")
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_KP", "1.10")
         )
         race_line_hold_kd = float(
             os.environ.get("MINIDUCK_RACE_LINE_HOLD_KD", "0.25")
+        )
+        race_line_hold_ki = float(
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_KI", "0.25")
+        )
+        race_line_hold_integral_limit_m_s = float(
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_INTEGRAL_LIMIT", "0.08")
         )
         race_line_hold_max_sagittal_mps = float(
             os.environ.get("MINIDUCK_RACE_LINE_HOLD_MAX_SAGITTAL_MPS", "0.12")

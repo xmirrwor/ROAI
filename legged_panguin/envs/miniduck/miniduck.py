@@ -118,6 +118,7 @@ class MiniDuck(LeggedRobot):
         self.line_reference_active = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self.race_line_integral = torch.zeros(self.num_envs, device=self.device)
         self.skill_mode = torch.full(
             (self.num_envs,), self.SKILL_STAND, dtype=torch.long, device=self.device
         )
@@ -518,7 +519,7 @@ class MiniDuck(LeggedRobot):
             cfg.heading_hold_max_yaw_rate,
         )
 
-    def _apply_lateral_race_heading_hold(self):
+    def _apply_lateral_race_heading_hold(self, update_integral=True):
         if self.cfg.commands.race_motion != "lateral":
             return
         active = torch.abs(self.commands[:, 1]) >= self._current_min_abs(
@@ -549,9 +550,18 @@ class MiniDuck(LeggedRobot):
             + world_velocity[:, 1] * torch.sin(self.command_heading)
         )
         command_cfg = self.cfg.commands
+        if update_integral:
+            self.race_line_integral[active] = torch.clamp(
+                self.race_line_integral[active]
+                + forward_displacement[active] * self.dt,
+                -command_cfg.race_line_hold_integral_limit_m_s,
+                command_cfg.race_line_hold_integral_limit_m_s,
+            )
+            self.race_line_integral[~active] = 0.0
         sagittal_correction = (
             -command_cfg.race_line_hold_kp * forward_displacement
             - command_cfg.race_line_hold_kd * forward_velocity
+            - command_cfg.race_line_hold_ki * self.race_line_integral
         )
         self.commands[active, 0] = torch.clamp(
             sagittal_correction[active],
@@ -672,6 +682,7 @@ class MiniDuck(LeggedRobot):
         self.current_teacher_reference[env_ids] = 0.0
         self.emergency_probe_active[env_ids] = False
         self.line_reference_active[env_ids] = False
+        self.race_line_integral[env_ids] = 0.0
         self.skill_mode[env_ids] = self.SKILL_STAND
         nominal_height = self.cfg.skill_curriculum.nominal_body_height_m
         self.target_base_height[env_ids] = nominal_height
@@ -1059,6 +1070,7 @@ class MiniDuck(LeggedRobot):
                 self.command_start_xy[reference_ids] = self.root_states[
                     reference_ids, :2
                 ]
+                self.race_line_integral[reference_ids] = 0.0
             self.line_reference_active[env_ids] = True
             self.skill_mode[env_ids] = self.SKILL_LOCOMOTION
             self._schedule_skill_height(
@@ -2766,15 +2778,31 @@ class MiniDuck(LeggedRobot):
             * self._pure_lateral_command_mask()
         )
 
-    def _reward_lateral_race_path_error(self):
-        if self.cfg.commands.race_motion != "lateral":
-            return torch.zeros(self.num_envs, device=self.device)
+    def _lateral_race_cross_track(self):
         delta_xy = self.root_states[:, :2] - self.command_start_xy
-        forward_displacement = (
+        return (
             delta_xy[:, 0] * torch.cos(self.command_heading)
             + delta_xy[:, 1] * torch.sin(self.command_heading)
         )
-        normalized_error = torch.square(forward_displacement / 0.05)
+
+    def _reward_lateral_race_centered_speed(self):
+        if self.cfg.commands.race_motion != "lateral":
+            return torch.zeros(self.num_envs, device=self.device)
+        signed_speed = torch.sign(self.commands[:, 1]) * self.base_lin_vel[:, 1]
+        normalized_speed = torch.clamp(
+            signed_speed / max(self.cfg.commands.race_lateral_target_speed, 1.0e-4),
+            min=0.0,
+            max=1.25,
+        )
+        width = max(self.cfg.commands.race_centerline_width_m, 1.0e-4)
+        centered = torch.exp(-torch.square(self._lateral_race_cross_track() / width))
+        return normalized_speed * centered * self._pure_lateral_command_mask()
+
+    def _reward_lateral_race_path_error(self):
+        if self.cfg.commands.race_motion != "lateral":
+            return torch.zeros(self.num_envs, device=self.device)
+        width = max(self.cfg.commands.race_centerline_width_m, 1.0e-4)
+        normalized_error = torch.square(self._lateral_race_cross_track() / width)
         return (
             torch.clamp(normalized_error, max=16.0)
             * self._pure_lateral_command_mask()

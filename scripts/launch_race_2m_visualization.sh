@@ -9,7 +9,7 @@ DISPLAY_NUMBER="${MINIDUCK_DISPLAY:-:20}"
 LOG_DIR="logs/visualization"
 PID_FILE="$LOG_DIR/race_2m.pid"
 LOG_FILE="$LOG_DIR/race_2m.log"
-CHECKPOINT="${MINIDUCK_RACE_CHECKPOINT:-checkpoints/miniduck_race_lateral_2m_straight_model_12040.pt}"
+CHECKPOINT="${MINIDUCK_RACE_CHECKPOINT:-checkpoints/miniduck_race_lateral_2m_centerline_model_12060.pt}"
 mkdir -p "$LOG_DIR"
 
 if [[ -f "$PID_FILE" ]]; then
