@@ -7,6 +7,7 @@ from pathlib import Path
 import math
 import os
 import time
+from typing import Optional
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -93,17 +94,39 @@ class JumpMetrics:
 
 
 class MiniDuckJumpSim:
-    def __init__(self, gui: bool = False):
+    def __init__(
+        self,
+        gui: bool = False,
+        physics_substeps: int = 1,
+        solver_iterations: int = 80,
+        contact_erp: Optional[float] = None,
+    ):
+        if physics_substeps < 1:
+            raise ValueError("physics_substeps must be at least 1")
         self.gui = gui
+        self.physics_config = {
+            "substeps": int(physics_substeps),
+            "solver_iterations": int(solver_iterations),
+            "contact_erp": contact_erp,
+        }
         self.client = p.connect(p.GUI if gui else p.DIRECT)
         if self.client < 0:
             raise RuntimeError("Unable to connect to PyBullet")
         p.setGravity(0, 0, -9.81, physicsClientId=self.client)
         p.setTimeStep(DT, physicsClientId=self.client)
-        p.setPhysicsEngineParameter(
+        physics_parameters = dict(
             fixedTimeStep=DT,
-            numSolverIterations=80,
+            numSubSteps=physics_substeps,
+            numSolverIterations=solver_iterations,
             deterministicOverlappingPairs=1,
+        )
+        if contact_erp is not None:
+            physics_parameters.update(
+                contactERP=contact_erp,
+                frictionERP=contact_erp,
+            )
+        p.setPhysicsEngineParameter(
+            **physics_parameters,
             physicsClientId=self.client,
         )
         plane_shape = p.createCollisionShape(
@@ -247,6 +270,13 @@ class MiniDuckJumpSim:
                 physicsClientId=self.client,
             )
 
+    def _normal_force(self, contacts):
+        # PyBullet reports contact force per internal substep. Normalize it to
+        # the outer 240 Hz control step so thresholds remain configuration-safe.
+        return self.physics_config["substeps"] * sum(
+            point[9] for point in contacts
+        )
+
     @staticmethod
     def _pose(delta):
         hip, knee, ankle = delta
@@ -362,14 +392,14 @@ class MiniDuckJumpSim:
                 p.getContactPoints(self.robot, self.plane, linkIndexA=foot, physicsClientId=self.client)
                 for foot in self.feet
             ]
-            foot_forces = [sum(point[9] for point in points) for points in contacts]
+            foot_forces = [self._normal_force(points) for points in contacts]
             foot_contacts = [force > CONTACT_FORCE_THRESHOLD for force in foot_forces]
             all_ground_contacts = p.getContactPoints(
                 self.robot,
                 self.plane,
                 physicsClientId=self.client,
             )
-            total_ground_force = sum(point[9] for point in all_ground_contacts)
+            total_ground_force = self._normal_force(all_ground_contacts)
             # A valid flight requires the complete robot to be unsupported.
             # Checking feet alone misclassifies a fallen trunk or shin as flight.
             both_airborne = total_ground_force <= CONTACT_FORCE_THRESHOLD
@@ -491,9 +521,8 @@ class MiniDuckJumpSim:
             abs(final_pitch - 0.451947301626),
         )
         final_foot_forces = [
-            sum(
-                point[9]
-                for point in p.getContactPoints(
+            self._normal_force(
+                p.getContactPoints(
                     self.robot,
                     self.plane,
                     linkIndexA=foot,

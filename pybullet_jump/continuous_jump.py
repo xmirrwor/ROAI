@@ -29,16 +29,35 @@ class ContinuousJumpMetrics:
     landing_count: int
     min_flight_peak_com: float
     mean_flight_peak_com: float
+    min_ballistic_rise: float
     min_foot_clearance: float
     max_drift: float
     max_landing_impact: float
     max_post_landing_speed: float
+    max_final_speed: float
+    max_final_tilt: float
+    max_yaw_error: float
+    max_support_error: float
     body_hit: bool
     all_settled: bool
     cycles: list
 
 
 class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
+    def __init__(
+        self,
+        gui: bool = False,
+        physics_substeps: int = 2,
+        solver_iterations: int = 120,
+        contact_erp: float = 0.20,
+    ):
+        super().__init__(
+            gui=gui,
+            physics_substeps=physics_substeps,
+            solver_iterations=solver_iterations,
+            contact_erp=contact_erp,
+        )
+
     def evaluate_continuous(
         self,
         parameters,
@@ -57,6 +76,10 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
 
         self.reset()
         global_initial_com, _ = self._center_of_mass_state()
+        _, initial_orientation = p.getBasePositionAndOrientation(
+            self.robot, self.client
+        )
+        global_initial_yaw = p.getEulerFromQuaternion(initial_orientation)[2]
         frames = []
         cycles = []
 
@@ -114,12 +137,12 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
                     )
                     for foot in self.feet
                 ]
-                foot_forces = [sum(point[9] for point in points) for points in foot_points]
+                foot_forces = [self._normal_force(points) for points in foot_points]
                 foot_contacts = [force > CONTACT_FORCE_THRESHOLD for force in foot_forces]
                 all_contacts = p.getContactPoints(
                     self.robot, self.plane, physicsClientId=self.client
                 )
-                total_force = sum(point[9] for point in all_contacts)
+                total_force = self._normal_force(all_contacts)
                 unsupported = total_force <= CONTACT_FORCE_THRESHOLD
                 com, com_velocity = self._center_of_mass_state()
                 vertical_velocity = float(com_velocity[2])
@@ -184,12 +207,17 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
             final_com, final_velocity = self._center_of_mass_state()
             drift = float(np.linalg.norm(final_com[:2] - cycle_initial_com[:2]))
             _, orientation = p.getBasePositionAndOrientation(self.robot, self.client)
-            roll, pitch, _ = p.getEulerFromQuaternion(orientation)
+            roll, pitch, yaw = p.getEulerFromQuaternion(orientation)
             final_tilt = max(abs(roll), abs(pitch - 0.451947301626))
+            yaw_error = abs(
+                math.atan2(
+                    math.sin(yaw - global_initial_yaw),
+                    math.cos(yaw - global_initial_yaw),
+                )
+            )
             final_forces = [
-                sum(
-                    point[9]
-                    for point in p.getContactPoints(
+                self._normal_force(
+                    p.getContactPoints(
                         self.robot,
                         self.plane,
                         linkIndexA=foot,
@@ -202,16 +230,20 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
             if post_landing_speed is None:
                 post_landing_speed = final_speed
             support_ratio = sum(final_forces) / max(self.total_mass * 9.81, 1.0)
+            final_both_feet_contact = all(
+                force > CONTACT_FORCE_THRESHOLD for force in final_forces
+            )
             ballistic_rise = (
                 max(0.0, max_flight_com - takeoff_z) if takeoff_z is not None else 0.0
             )
             settled = (
                 landed
-                and all(force > CONTACT_FORCE_THRESHOLD for force in final_forces)
+                and final_both_feet_contact
                 and not body_hit
                 and final_speed < 0.25
                 and post_landing_speed < 0.22
                 and final_tilt < math.radians(12.0)
+                and yaw_error < math.radians(8.0)
                 and drift < 0.035
                 and 0.60 < support_ratio < 1.40
                 and landing_impact < 20.0 * self.total_mass * 9.81
@@ -230,6 +262,11 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
                     "drift": drift,
                     "landing_impact": landing_impact,
                     "post_landing_speed": post_landing_speed,
+                    "final_speed": final_speed,
+                    "final_tilt": final_tilt,
+                    "yaw_error": yaw_error,
+                    "support_ratio": support_ratio,
+                    "final_both_feet_contact": final_both_feet_contact,
                     "body_hit": body_hit,
                 }
             )
@@ -249,6 +286,10 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
         clearances = [cycle["foot_clearance"] for cycle in cycles if cycle["flight"]]
         min_peak = min(peaks, default=0.0)
         mean_peak = float(np.mean(peaks)) if peaks else 0.0
+        min_ballistic_rise = min(
+            (cycle["ballistic_rise"] for cycle in cycles if cycle["flight"]),
+            default=0.0,
+        )
         min_clearance = min(clearances, default=0.0)
         max_drift = max((cycle["drift"] for cycle in cycles), default=0.0)
         max_impact = max(
@@ -257,15 +298,38 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
         max_post_speed = max(
             (cycle["post_landing_speed"] for cycle in cycles), default=0.0
         )
+        max_final_speed = max(
+            (cycle["final_speed"] for cycle in cycles), default=0.0
+        )
+        max_final_tilt = max(
+            (cycle["final_tilt"] for cycle in cycles), default=0.0
+        )
+        max_yaw_error = max(
+            (cycle["yaw_error"] for cycle in cycles), default=0.0
+        )
+        max_support_error = max(
+            (abs(cycle["support_ratio"] - 1.0) for cycle in cycles),
+            default=0.0,
+        )
+        ready_contacts = sum(
+            cycle["final_both_feet_contact"] for cycle in cycles
+        )
         score = (
             10000.0 * completed
             + 1000.0 * landings
             + 100.0 * flights
+            + 2500.0 * ready_contacts
             + 1000.0 * min_peak
             + 100.0 * mean_peak
+            + 50000.0 * min_ballistic_rise
+            + 2000.0 * min_clearance
             - 200.0 * min(max_drift, 10.0)
             - 2.0 * max(max_impact - 300.0, 0.0)
             - 100.0 * min(max_post_speed, 5.0)
+            - 1500.0 * min(max_final_speed, 5.0)
+            - 1000.0 * min(max_final_tilt, math.pi)
+            - 500.0 * min(max_yaw_error, math.pi)
+            - 1000.0 * min(max_support_error, 2.0)
         )
         metrics = ContinuousJumpMetrics(
             score=score,
@@ -275,10 +339,15 @@ class MiniDuckContinuousJumpSim(MiniDuckJumpSim):
             landing_count=landings,
             min_flight_peak_com=min_peak,
             mean_flight_peak_com=mean_peak,
+            min_ballistic_rise=min_ballistic_rise,
             min_foot_clearance=min_clearance,
             max_drift=max_drift,
             max_landing_impact=max_impact,
             max_post_landing_speed=max_post_speed,
+            max_final_speed=max_final_speed,
+            max_final_tilt=max_final_tilt,
+            max_yaw_error=max_yaw_error,
+            max_support_error=max_support_error,
             body_hit=any(cycle["body_hit"] for cycle in cycles),
             all_settled=completed == jumps,
             cycles=cycles,

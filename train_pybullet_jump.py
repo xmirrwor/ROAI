@@ -44,6 +44,9 @@ def parse_args():
     parser.add_argument("--landing-target-force", type=float, default=220.0)
     parser.add_argument("--landing-height-budget", type=float, default=0.0)
     parser.add_argument("--checkpoint-every", type=int, default=5)
+    parser.add_argument("--physics-substeps", type=int, default=1)
+    parser.add_argument("--solver-iterations", type=int, default=80)
+    parser.add_argument("--contact-erp", type=float)
     parser.add_argument("--no-save", action="store_true")
     return parser.parse_args()
 
@@ -86,7 +89,12 @@ def main():
     stagnant_iterations = 0
     optimization_mode = None
     landing_anchor = None
-    sim = MiniDuckJumpSim(gui=False)
+    sim = MiniDuckJumpSim(
+        gui=False,
+        physics_substeps=args.physics_substeps,
+        solver_iterations=args.solver_iterations,
+        contact_erp=args.contact_erp,
+    )
     try:
         if resume_mode:
             baseline_metrics = sim.evaluate(
@@ -369,6 +377,7 @@ def main():
                         "format": "miniduck-pybullet-jump-v8-checkpoint",
                         "iteration": iteration + 1,
                         "seed": args.seed,
+                        "physics": sim.physics_config,
                         "parameters": parameters_to_dict(best[1]),
                         "metrics": metrics_to_dict(best[0]),
                         "frames": [],
@@ -395,6 +404,7 @@ def main():
     payload = {
         "format": "miniduck-pybullet-jump-v8",
         "seed": args.seed,
+        "physics": sim.physics_config,
         "parameters": parameters_to_dict(best[1]),
         "metrics": metrics_to_dict(metrics),
         "frames": frames,

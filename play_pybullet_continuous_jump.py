@@ -26,7 +26,13 @@ def main():
     inter_jump_pause = data.get("continuous_parameters", {}).get(
         "inter_jump_pause", 0.25
     )
-    sim = MiniDuckContinuousJumpSim(gui=True)
+    physics = data.get("physics", {})
+    sim = MiniDuckContinuousJumpSim(
+        gui=True,
+        physics_substeps=physics.get("substeps", 2),
+        solver_iterations=physics.get("solver_iterations", 120),
+        contact_erp=physics.get("contact_erp", 0.20),
+    )
     try:
         while True:
             metrics, _ = sim.evaluate_continuous(
