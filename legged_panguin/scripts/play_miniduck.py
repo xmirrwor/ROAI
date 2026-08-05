@@ -76,7 +76,7 @@ BALL_SEQUENCE = (
 
 RACE_2M_SEQUENCE = (
     ("race_ready", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "primary", "race_reset", "action_switch"),
-    ("race_2m", (0.0, 0.26, 0.0), 8.0, 1, "nominal", "primary", None, "action_switch"),
+    ("race_2m", (0.0, 0.26, 0.0), 7.3, 1, "nominal", "primary", None, "action_switch"),
     ("race_finish", (0.0, 0.0, 0.0), 1.5, 0, "nominal", "primary", None, "action_switch"),
 )
 
@@ -416,12 +416,14 @@ def _draw_race_course(env):
         ((start_x - half_width, finish_y, z), (start_x + half_width, finish_y, z)),
         ((start_x - half_width, start_y, z), (start_x - half_width, finish_y, z)),
         ((start_x + half_width, start_y, z), (start_x + half_width, finish_y, z)),
+        ((start_x, start_y, z), (start_x, finish_y, z)),
     ]
     colors = [
         (0.10, 0.45, 1.00),
         (0.10, 1.00, 0.30),
         (0.95, 0.95, 0.95),
         (0.95, 0.95, 0.95),
+        (1.00, 0.82, 0.10),
     ]
     for distance in (0.5, 1.0, 1.5):
         y = start_y + distance

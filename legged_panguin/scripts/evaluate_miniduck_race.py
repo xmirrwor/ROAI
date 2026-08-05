@@ -28,6 +28,10 @@ def _race_args():
     parser.add_argument("--direction_sign", type=int, choices=(-1, 1), default=1)
     parser.add_argument("--distance_m", type=float, default=2.0)
     parser.add_argument("--timeout_s", type=float, default=30.0)
+    parser.add_argument("--max_cross_track_m", type=float, default=0.10)
+    parser.add_argument("--lateral_line_kp", type=float, default=1.00)
+    parser.add_argument("--lateral_line_kd", type=float, default=0.25)
+    parser.add_argument("--lateral_line_max_mps", type=float, default=0.12)
     parser.add_argument("--checkpoint_path", required=True)
     parser.add_argument("--output_dir", default="evaluation/race_2m")
     parser.add_argument("--run_label", default=None)
@@ -83,6 +87,13 @@ def evaluate(args, race):
     env_cfg.skill_curriculum.forced_stage = (
         0 if race.motion == "forward" else 4
     )
+    if race.motion == "lateral":
+        env_cfg.commands.race_motion = "lateral"
+        env_cfg.commands.race_line_hold_kp = race.lateral_line_kp
+        env_cfg.commands.race_line_hold_kd = race.lateral_line_kd
+        env_cfg.commands.race_line_hold_max_sagittal_mps = (
+            race.lateral_line_max_mps
+        )
     env_cfg.commands.resampling_time = race.timeout_s + 2.0
     env_cfg.noise.add_noise = race.randomized
     env_cfg.domain_rand.curriculum_push_robots = False
@@ -166,6 +177,8 @@ def evaluate(args, race):
         env.commands[:, :2] = command_batch
         if race.motion == "forward":
             env._apply_straight_heading_hold()
+        elif race.motion == "lateral":
+            env._apply_lateral_race_heading_hold()
         else:
             yaw = _yaw_xyzw(env.root_states[:, 3:7])
             heading_error = torch.atan2(
@@ -235,8 +248,11 @@ def evaluate(args, race):
             max_tilt,
         )
 
-        net_distance = torch.norm(delta, dim=1)
-        reached = active & (net_distance >= race.distance_m)
+        reached = (
+            active
+            & (progress >= race.distance_m)
+            & (torch.abs(cross_track) <= race.max_cross_track_m)
+        )
         finished |= reached
         finish_time[reached] = (step + 1) * env.dt
         final_progress[reached] = progress[reached]
@@ -319,12 +335,15 @@ def evaluate(args, race):
         1000.0 * completion_rate
         + 100.0 * mean_finish_speed
         - 200.0 * fall_rate
-        - 10.0 * mean_chord_deviation
+        - 50.0 * mean_cross
     )
     acceptance = {
         "completion_rate_at_least_85pct": completion_rate >= 0.85,
         "fall_rate_at_most_5pct": fall_rate <= 0.05,
-        "mean_chord_deviation_at_most_0p10m": mean_chord_deviation <= 0.10,
+        "p95_fixed_line_cross_track_at_most_limit": _percentile(
+            max_cross_track
+        )
+        <= race.max_cross_track_m,
         "p05_path_efficiency_at_least_0p90": _percentile(
             path_efficiency,
             0.05,
@@ -345,6 +364,10 @@ def evaluate(args, race):
         "randomized": race.randomized,
         "distance_m": race.distance_m,
         "timeout_s": race.timeout_s,
+        "max_cross_track_m": race.max_cross_track_m,
+        "lateral_line_kp": race.lateral_line_kp,
+        "lateral_line_kd": race.lateral_line_kd,
+        "lateral_line_max_mps": race.lateral_line_max_mps,
         "command_speed_mps": race.command_speed_mps,
         "direction_sign": race.direction_sign,
         "command_vx_mps": float(command[0]),

@@ -178,6 +178,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             "lateral_yaw_rate",
             "lateral_heading_error",
             "lateral_race_speed",
+            "lateral_race_path_error",
             "sagittal_heading_error",
             "sagittal_lateral_displacement",
             "sagittal_velocity_tracking",
@@ -305,6 +306,7 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
             lateral_yaw_rate = -2.4 if RACE_LATERAL else -1.6
             lateral_heading_error = -3.5 if RACE_LATERAL else -2.2
             lateral_race_speed = 12.0 if RACE_LATERAL else 0.0
+            lateral_race_path_error = -6.0 if RACE_LATERAL else 0.0
             yaw_axis_isolation = 0.0 if RACE_LATERAL else -0.45
             torques = -1.5e-4
             dof_acc = -2.0e-7
@@ -322,6 +324,15 @@ class MiniDuckFlatCfg(LeggedRobotCfg):
         ]
         race_lateral_target_speed = float(
             os.environ.get("MINIDUCK_RACE_LATERAL_TARGET_SPEED", "0.34")
+        )
+        race_line_hold_kp = float(
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_KP", "1.00")
+        )
+        race_line_hold_kd = float(
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_KD", "0.25")
+        )
+        race_line_hold_max_sagittal_mps = float(
+            os.environ.get("MINIDUCK_RACE_LINE_HOLD_MAX_SAGITTAL_MPS", "0.12")
         )
         race_positive_direction_prob = float(
             os.environ.get("MINIDUCK_RACE_POSITIVE_DIRECTION_PROB", "0.5")

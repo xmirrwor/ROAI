@@ -521,7 +521,9 @@ class MiniDuck(LeggedRobot):
     def _apply_lateral_race_heading_hold(self):
         if self.cfg.commands.race_motion != "lateral":
             return
-        active = self._pure_lateral_command_mask().bool()
+        active = torch.abs(self.commands[:, 1]) >= self._current_min_abs(
+            "lin_vel_y"
+        )
         if not torch.any(active):
             return
         _, _, yaw = euler_from_quat(self.base_quat)
@@ -535,6 +537,26 @@ class MiniDuck(LeggedRobot):
             correction[active],
             -cfg.heading_hold_max_yaw_rate,
             cfg.heading_hold_max_yaw_rate,
+        )
+        delta_xy = self.root_states[:, :2] - self.command_start_xy
+        forward_displacement = (
+            delta_xy[:, 0] * torch.cos(self.command_heading)
+            + delta_xy[:, 1] * torch.sin(self.command_heading)
+        )
+        world_velocity = self.root_states[:, 7:9]
+        forward_velocity = (
+            world_velocity[:, 0] * torch.cos(self.command_heading)
+            + world_velocity[:, 1] * torch.sin(self.command_heading)
+        )
+        command_cfg = self.cfg.commands
+        sagittal_correction = (
+            -command_cfg.race_line_hold_kp * forward_displacement
+            - command_cfg.race_line_hold_kd * forward_velocity
+        )
+        self.commands[active, 0] = torch.clamp(
+            sagittal_correction[active],
+            -command_cfg.race_line_hold_max_sagittal_mps,
+            command_cfg.race_line_hold_max_sagittal_mps,
         )
 
     def set_external_skill(self, mode, target_height=None, env_ids=None):
@@ -1795,7 +1817,7 @@ class MiniDuck(LeggedRobot):
         lateral_active = torch.abs(self.commands[:, 1]) >= self._current_min_abs("lin_vel_y")
         low_sagittal = torch.abs(self.commands[:, 0]) < 0.04
         if self.cfg.commands.race_motion == "lateral":
-            return (lateral_active & low_sagittal).float()
+            return lateral_active.float()
         low_yaw = torch.abs(self.commands[:, 2]) < 0.08
         return (lateral_active & low_sagittal & low_yaw).float()
 
@@ -2741,6 +2763,20 @@ class MiniDuck(LeggedRobot):
         )
         return (
             torch.clamp(normalized_speed, min=0.0, max=1.25)
+            * self._pure_lateral_command_mask()
+        )
+
+    def _reward_lateral_race_path_error(self):
+        if self.cfg.commands.race_motion != "lateral":
+            return torch.zeros(self.num_envs, device=self.device)
+        delta_xy = self.root_states[:, :2] - self.command_start_xy
+        forward_displacement = (
+            delta_xy[:, 0] * torch.cos(self.command_heading)
+            + delta_xy[:, 1] * torch.sin(self.command_heading)
+        )
+        normalized_error = torch.square(forward_displacement / 0.05)
+        return (
+            torch.clamp(normalized_error, max=16.0)
             * self._pure_lateral_command_mask()
         )
 
