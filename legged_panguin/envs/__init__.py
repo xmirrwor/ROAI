@@ -31,7 +31,18 @@
 from .base.legged_robot import LeggedRobot
 from .miniduck.miniduck import MiniDuck
 from .miniduck.miniduck_config import MiniDuckFlatCfg, MiniDuckFlatCfgPPO
+from .miniduck.miniduck_single_leg_physics import MiniDuckSingleLegPhysics
+from .miniduck.miniduck_single_leg_physics_config import (
+    MiniDuckSingleLegPhysicsCfg,
+    MiniDuckSingleLegPhysicsCfgPPO,
+)
 
 from legged_panguin.utils.task_registry import task_registry
 
 task_registry.register( "miniduck_flat", MiniDuck, MiniDuckFlatCfg(), MiniDuckFlatCfgPPO() )
+task_registry.register(
+    "miniduck_single_leg_physics",
+    MiniDuckSingleLegPhysics,
+    MiniDuckSingleLegPhysicsCfg(),
+    MiniDuckSingleLegPhysicsCfgPPO(),
+)

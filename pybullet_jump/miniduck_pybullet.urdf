@@ -1,0 +1,473 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="MINIDUCK_URDF">
+  <mujoco>
+    <compiler meshdir="../meshes" discardvisual="false" />
+  </mujoco>
+  <!--Converted from the no-head Open Duck Mini V2 MuJoCo XML. Sensors, actuators, and MuJoCo-only solver options are omitted.-->
+  <material name="body_front_material">
+    <color rgba="0.917647 0.917647 0.917647 1" />
+  </material>
+  <material name="body_back_material">
+    <color rgba="0.917647 0.917647 0.917647 1" />
+  </material>
+  <material name="body_middle_bottom_material">
+    <color rgba="0.917647 0.917647 0.917647 1" />
+  </material>
+  <material name="body_middle_top_material">
+    <color rgba="0.917647 0.917647 0.917647 1" />
+  </material>
+  <material name="trunk_bottom_material">
+    <color rgba="0.180392 0.180392 0.180392 1" />
+  </material>
+  <material name="trunk_top_material">
+    <color rgba="0.180392 0.180392 0.180392 1" />
+  </material>
+  <material name="roll_motor_bottom_material">
+    <color rgba="0.647059 0.647059 0.647059 1" />
+  </material>
+  <material name="roll_motor_top_material">
+    <color rgba="0.901961 0.901961 0.901961 1" />
+  </material>
+  <material name="left_roll_to_pitch_material">
+    <color rgba="0.909804 0.572549 0.164706 1" />
+  </material>
+  <material name="leg_spacer_material">
+    <color rgba="0.647059 0.647059 0.647059 1" />
+  </material>
+  <material name="left_knee_to_ankle_right_sheet_material">
+    <color rgba="0.223529 0.219608 0.219608 1" />
+  </material>
+  <material name="left_knee_to_ankle_left_sheet_material">
+    <color rgba="0.223529 0.219608 0.219608 1" />
+  </material>
+  <material name="foot_side_material">
+    <color rgba="0.980392 0.713725 0.00392157 1" />
+  </material>
+  <material name="foot_bottom_tpu_material">
+    <color rgba="0.305882 0.298039 0.278431 1" />
+  </material>
+  <material name="foot_bottom_pla_material">
+    <color rgba="0.305882 0.298039 0.278431 1" />
+  </material>
+  <material name="foot_top_material">
+    <color rgba="0.980392 0.713725 0.00392157 1" />
+  </material>
+  <material name="right_roll_to_pitch_material">
+    <color rgba="0.909804 0.572549 0.164706 1" />
+  </material>
+  <link name="base">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001" />
+    </inertial>
+  </link>
+  <link name="trunk_assembly">
+    <inertial>
+      <origin xyz="-0.0483259 -9.97823e-05 0.0384971" rpy="0 0 0" />
+      <mass value="0.698526" />
+      <inertia ixx="0.00167701" ixy="-1.31662e-05" ixz="-3.24953e-05" iyy="0.00344479" iyz="-2.15581e-06" izz="0.00292635" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/body_front.stl" />
+      </geometry>
+      <material name="body_front_material" />
+    </visual>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/body_back.stl" />
+      </geometry>
+      <material name="body_back_material" />
+    </visual>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/body_middle_bottom.stl" />
+      </geometry>
+      <material name="body_middle_bottom_material" />
+    </visual>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/body_middle_top.stl" />
+      </geometry>
+      <material name="body_middle_top_material" />
+    </visual>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/trunk_bottom.stl" />
+      </geometry>
+      <material name="trunk_bottom_material" />
+    </visual>
+    <visual>
+      <origin xyz="-0.019 0 0.0648909" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/trunk_top.stl" />
+      </geometry>
+      <material name="trunk_top_material" />
+    </visual>
+  </link>
+  <joint name="base_to_trunk_assembly" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base" />
+    <child link="trunk_assembly" />
+  </joint>
+  <link name="hip_roll_assembly">
+    <inertial>
+      <origin xyz="0.000795081 -5.46541e-06 -0.03306" rpy="0 0 0" />
+      <mass value="0.06648" />
+      <inertia ixx="2.44411e-05" ixy="2.35658e-09" ixz="-3.81059e-07" iyy="2.81818e-05" iyz="-7.50036e-09" izz="1.42687e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.035 0.01905" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/roll_motor_bottom.stl" />
+      </geometry>
+      <material name="roll_motor_bottom_material" />
+    </visual>
+    <visual>
+      <origin xyz="0 -0.035 0.01905" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/roll_motor_top.stl" />
+      </geometry>
+      <material name="roll_motor_top_material" />
+    </visual>
+  </link>
+  <joint name="left_hip_yaw" type="revolute">
+    <origin xyz="-0.019 0.035 0.0459409" rpy="0 0 0" />
+    <parent link="trunk_assembly" />
+    <child link="hip_roll_assembly" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.523598775598" upper="0.523598775598" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="left_roll_to_pitch_assembly">
+    <inertial>
+      <origin xyz="0.0508042 -0.00041105 0.0204704" rpy="0 0 0" />
+      <mass value="0.07516" />
+      <inertia ixx="2.52335e-05" ixy="1.22133e-07" ixz="-5.90499e-07" iyy="4.13855e-05" iyz="-1.07544e-07" izz="2.8127e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="-0.035 -0.065 0.01905" rpy="1.57079632679 1.57079632679 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_roll_to_pitch.stl" />
+      </geometry>
+      <material name="left_roll_to_pitch_material" />
+    </visual>
+  </link>
+  <joint name="left_hip_roll" type="revolute">
+    <origin xyz="0.01905 0 -0.046015" rpy="-1.57079632679 0 1.57079632679" />
+    <parent link="hip_roll_assembly" />
+    <child link="left_roll_to_pitch_assembly" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.436332312999" upper="0.436332312999" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="knee_and_ankle_assembly">
+    <inertial>
+      <origin xyz="0.00253369 -0.0390636 0.0102776" rpy="0 0 0" />
+      <mass value="0.12407" />
+      <inertia ixx="0.000211406" ixy="-2.68706e-05" ixz="3.81906e-06" iyy="7.83759e-05" iyz="2.08009e-05" izz="0.000225619" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10925" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/leg_spacer.stl" />
+      </geometry>
+      <material name="leg_spacer_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_right_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_right_sheet_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_left_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_left_sheet_material" />
+    </visual>
+  </link>
+  <joint name="left_hip_pitch" type="revolute">
+    <origin xyz="0.07415 0 0.03511" rpy="3.14159265359 1.57079632679 0" />
+    <parent link="left_roll_to_pitch_assembly" />
+    <child link="knee_and_ankle_assembly" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.2217304764" upper="0.523598775598" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="knee_and_ankle_assembly_2">
+    <inertial>
+      <origin xyz="5.01859e-06 -0.0577465 0.0181136" rpy="0 0 0" />
+      <mass value="0.07259" />
+      <inertia ixx="4.99575e-05" ixy="1.03817e-08" ixz="2.25175e-09" iyy="1.87273e-05" iyz="8.81049e-08" izz="4.23932e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10925" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/leg_spacer.stl" />
+      </geometry>
+      <material name="leg_spacer_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_right_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_right_sheet_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_left_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_left_sheet_material" />
+    </visual>
+  </link>
+  <joint name="left_knee" type="revolute">
+    <origin xyz="0 -0.07865 0.0001" rpy="0 0 0" />
+    <parent link="knee_and_ankle_assembly" />
+    <child link="knee_and_ankle_assembly_2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.57079632679" upper="1.57079632679" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="foot_assembly">
+    <inertial>
+      <origin xyz="0.0110718 -0.0246608 0.0190626" rpy="0 0 0" />
+      <mass value="0.07524" />
+      <inertia ixx="1.87482e-05" ixy="1.58839e-06" ixz="-6.52354e-09" iyy="6.74427e-05" iyz="5.67391e-08" izz="6.061e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 0.2223 0.10905" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_side.stl" />
+      </geometry>
+      <material name="foot_side_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01656 0.2228 0.10955" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_bottom_tpu.stl" />
+      </geometry>
+      <material name="foot_bottom_tpu_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01656 0.2228 0.10955" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_bottom_pla.stl" />
+      </geometry>
+      <material name="foot_bottom_pla_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.2223 0.10905" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_top.stl" />
+      </geometry>
+      <material name="foot_top_material" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.010" rpy="0 0 0" />
+      <geometry>
+        <box size="0.080 0.045 0.015" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_ankle" type="revolute">
+    <origin xyz="0 -0.07865 0.0001" rpy="0 0 0" />
+    <parent link="knee_and_ankle_assembly_2" />
+    <child link="foot_assembly" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.57079632679" upper="1.57079632679" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="hip_roll_assembly_2">
+    <inertial>
+      <origin xyz="0.000795081 -5.46541e-06 -0.03306" rpy="0 0 0" />
+      <mass value="0.06648" />
+      <inertia ixx="2.44411e-05" ixy="2.35658e-09" ixz="-3.81059e-07" iyy="2.81818e-05" iyz="-7.50036e-09" izz="1.42687e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.035 0.01905" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/roll_motor_bottom.stl" />
+      </geometry>
+      <material name="roll_motor_bottom_material" />
+    </visual>
+    <visual>
+      <origin xyz="0 -0.035 0.01905" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/roll_motor_top.stl" />
+      </geometry>
+      <material name="roll_motor_top_material" />
+    </visual>
+  </link>
+  <joint name="right_hip_yaw" type="revolute">
+    <origin xyz="-0.019 -0.035 0.0459409" rpy="0 0 0" />
+    <parent link="trunk_assembly" />
+    <child link="hip_roll_assembly_2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.523598775598" upper="0.523598775598" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="right_roll_to_pitch_assembly">
+    <inertial>
+      <origin xyz="-0.0508042 -0.000420742 0.0204704" rpy="0 0 0" />
+      <mass value="0.07516" />
+      <inertia ixx="2.52329e-05" ixy="-1.30528e-07" ixz="5.90499e-07" iyy="4.13855e-05" iyz="-9.13427e-08" izz="2.81264e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0.035 -0.065 0.01905" rpy="1.57079632679 1.57079632679 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/right_roll_to_pitch.stl" />
+      </geometry>
+      <material name="right_roll_to_pitch_material" />
+    </visual>
+  </link>
+  <joint name="right_hip_roll" type="revolute">
+    <origin xyz="0.01905 0 -0.046015" rpy="-1.57079632679 0 1.57079632679" />
+    <parent link="hip_roll_assembly_2" />
+    <child link="right_roll_to_pitch_assembly" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.436332312999" upper="0.436332312999" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="knee_and_ankle_assembly_3">
+    <inertial>
+      <origin xyz="0.00253369 0.0390636 0.010809" rpy="0 0 0" />
+      <mass value="0.12407" />
+      <inertia ixx="0.000212363" ixy="2.68706e-05" ixz="3.9656e-06" iyy="7.93324e-05" iyz="-2.17407e-05" izz="0.000225619" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 -0.14365 -0.07215" rpy="1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/leg_spacer.stl" />
+      </geometry>
+      <material name="leg_spacer_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 -0.14365 -0.07205" rpy="1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_right_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_right_sheet_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 -0.14365 -0.07205" rpy="1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_left_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_left_sheet_material" />
+    </visual>
+  </link>
+  <joint name="right_hip_pitch" type="revolute">
+    <origin xyz="-0.07415 0 0.03511" rpy="0 1.57079632679 0" />
+    <parent link="right_roll_to_pitch_assembly" />
+    <child link="knee_and_ankle_assembly_3" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.523598775598" upper="1.2217304764" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="knee_and_ankle_assembly_4">
+    <inertial>
+      <origin xyz="5.01859e-06 -0.0577465 0.0181136" rpy="0 0 0" />
+      <mass value="0.07259" />
+      <inertia ixx="4.99575e-05" ixy="1.03817e-08" ixz="2.25175e-09" iyy="1.87273e-05" iyz="8.81049e-08" izz="4.23932e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10925" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/leg_spacer.stl" />
+      </geometry>
+      <material name="leg_spacer_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_right_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_right_sheet_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.14365 0.10915" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/left_knee_to_ankle_left_sheet.stl" />
+      </geometry>
+      <material name="left_knee_to_ankle_left_sheet_material" />
+    </visual>
+  </link>
+  <joint name="right_knee" type="revolute">
+    <origin xyz="0 0.07865 0.037" rpy="3.14159265359 0 0" />
+    <parent link="knee_and_ankle_assembly_3" />
+    <child link="knee_and_ankle_assembly_4" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.57079632679" upper="1.57079632679" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+  <link name="foot_assembly_2">
+    <inertial>
+      <origin xyz="0.0110718 -0.0246608 0.0190626" rpy="0 0 0" />
+      <mass value="0.07524" />
+      <inertia ixx="1.87482e-05" ixy="1.58839e-06" ixz="-6.52354e-09" iyy="6.74427e-05" iyz="5.67391e-08" izz="6.061e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0.01606 0.2223 0.10905" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_side.stl" />
+      </geometry>
+      <material name="foot_side_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01656 0.2228 0.10955" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_bottom_tpu.stl" />
+      </geometry>
+      <material name="foot_bottom_tpu_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01656 0.2228 0.10955" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_bottom_pla.stl" />
+      </geometry>
+      <material name="foot_bottom_pla_material" />
+    </visual>
+    <visual>
+      <origin xyz="0.01606 0.2223 0.10905" rpy="-1.57079632679 0 0" />
+      <geometry>
+        <mesh filename="../resources/robots/miniduck/meshes/foot_top.stl" />
+      </geometry>
+      <material name="foot_top_material" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.010" rpy="0 0 0" />
+      <geometry>
+        <box size="0.080 0.045 0.015" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_ankle" type="revolute">
+    <origin xyz="0 -0.07865 0.0001" rpy="0 0 0" />
+    <parent link="knee_and_ankle_assembly_4" />
+    <child link="foot_assembly_2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.57079632679" upper="1.57079632679" effort="3.23" velocity="5.24" />
+    <dynamics damping="0.56" friction="0.068" />
+    <!-- MuJoCo position kp=13.37 -->
+  </joint>
+</robot>
